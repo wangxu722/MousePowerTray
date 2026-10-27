@@ -230,9 +230,10 @@ $script:ProbeBlock = {
             $out.BleCount = $nodes.Count
 
             # 在线判定只能看真正的 HID 设备实例（InstanceId 以 HID\ 开头）。
-            # BTHLEDEVICE\{00001812} 这类 GATT 服务节点即使设备断电也留在系统里，
-            # BTHLE\DEV_xxx 更是配对记录本身就常在 —— 拿它们判在线会永远显示"已连接"。
-            $hidIndex = (@(Get-PnpDevice -Class HIDClass -PresentOnly -ErrorAction SilentlyContinue |
+            # 注意 HID 实例的 Class 是 Mouse / Keyboard，不在 HIDClass 里；
+            # 而 BTHLEDEVICE\{00001812}（HOGP 服务节点，Class 才叫 HIDClass）断电后不会消失，
+            # BTHLE\DEV_xxx（配对记录）更是常在 —— 拿它们判在线会永远"已连接"。
+            $hidIndex = (@(Get-PnpDevice -Class Mouse, Keyboard, HIDClass -PresentOnly -ErrorAction SilentlyContinue |
                            Where-Object { $_.InstanceId -like 'HID\*' } |
                            ForEach-Object { $_.InstanceId }) -join '|').ToUpperInvariant()
             $list = New-Object System.Collections.ArrayList
@@ -255,7 +256,7 @@ $script:ProbeBlock = {
             $dev = $null
             try { $dev = Read-Node $cfg.Id $cfg.DevKey $cfg.Name } catch { }
             if ($dev -and $dev.Mac) {
-                $hit = @(Get-PnpDevice -Class HIDClass -PresentOnly -ErrorAction SilentlyContinue |
+                $hit = @(Get-PnpDevice -Class Mouse, Keyboard, HIDClass -PresentOnly -ErrorAction SilentlyContinue |
                          Where-Object {
                              $_.InstanceId -like 'HID\*' -and
                              $_.InstanceId.IndexOf($dev.Mac, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
@@ -394,6 +395,11 @@ function Apply-ProbeResult {
         $script:FailCount = 0
         if ($script:Cfg.Debug) {
             Write-Log ('POLL {0} {1}% online={2}' -f $dev.Name, $dev.Level, $dev.Online)
+        }
+        # 从在线翻成离线时补验一次，避免一次瞬时抖动就把图标判灰
+        if ($script:State.Online -and -not $dev.Online) {
+            $script:VerifyAt = (Get-Date).AddSeconds(2)
+            Write-Log 'STATE online -> offline (verify in 2s)'
         }
         $script:State.Id = $dev.Id
         $script:State.Name = $dev.Name
