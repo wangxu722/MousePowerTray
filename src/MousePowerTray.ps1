@@ -71,6 +71,11 @@ function Get-DefaultConfig {
         LowPercent     = 15
         LowNotify      = $true
         Debug          = $false
+        # 2.4G 接收器（厂商私有通道）—— 换鼠标改这三项
+        UsbVid         = '089D'
+        UsbPid         = '062F'
+        UsbUsagePage   = 'FF02'
+        LastUsbLevel   = -1
         Version        = 2
     }
 }
@@ -273,6 +278,266 @@ $script:ProbeBlock = {
     $out
 }
 
+# ------------------------------------------------- 2.4G 接收器（USB HID）----
+# 2.4G 模式下系统没有任何电量属性，只能听厂商私有通道：
+#   usage page 0xFF02 / 33 字节输入报告，格式实测为
+#     00 D1 <connected 01|00> <level 0-100> 00 01 11 01 00 ...
+#   00 D2 ... 是另一种状态帧，与本工具无关。
+# 只读：只打开 GENERIC_READ + 共享方式，绝不写 Output/Feature 报告。
+$script:UsbCSharp = @'
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+public static class HidBat
+{
+    [StructLayout(LayoutKind.Sequential)]
+    public struct GUID { public uint Data1; public ushort Data2; public ushort Data3; [MarshalAs(UnmanagedType.ByValArray, SizeConst = 8)] public byte[] Data4; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SP_DEVICE_INTERFACE_DATA { public int cbSize; public GUID InterfaceClassGuid; public int Flags; public IntPtr Reserved; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct HIDD_ATTRIBUTES { public int Size; public ushort VendorID; public ushort ProductID; public ushort VersionNumber; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct OVERLAPPED { public IntPtr Internal; public IntPtr InternalHigh; public int Offset; public int OffsetHigh; public IntPtr hEvent; }
+
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr SetupDiGetClassDevsW(ref GUID g, IntPtr e, IntPtr p, int f);
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern bool SetupDiEnumDeviceInterfaces(IntPtr s, IntPtr d, ref GUID g, int i, ref SP_DEVICE_INTERFACE_DATA x);
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool SetupDiGetDeviceInterfaceDetailW(IntPtr s, ref SP_DEVICE_INTERFACE_DATA x, IntPtr b, int n, out int r, IntPtr d);
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern bool SetupDiDestroyDeviceInfoList(IntPtr s);
+    [DllImport("hid.dll")]
+    static extern void HidD_GetHidGuid(out GUID g);
+    [DllImport("hid.dll", SetLastError = true)]
+    static extern bool HidD_GetAttributes(IntPtr h, ref HIDD_ATTRIBUTES a);
+    [DllImport("hid.dll", SetLastError = true)]
+    static extern bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
+    [DllImport("hid.dll")]
+    static extern int HidP_GetCaps(IntPtr pp, byte[] caps);
+    [DllImport("hid.dll")]
+    static extern bool HidD_FreePreparsedData(IntPtr pp);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateFileW(string f, uint acc, int share, IntPtr sa, uint disp, uint flags, IntPtr t);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool ReadFile(IntPtr h, byte[] b, int n, out int read, IntPtr ov);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr CreateEventW(IntPtr a, bool m, bool i, IntPtr n);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern uint WaitForSingleObject(IntPtr h, uint ms);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetOverlappedResult(IntPtr h, IntPtr ov, out int got, bool w);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CancelIoEx(IntPtr h, IntPtr ov);
+
+    const uint GENERIC_READ = 0x80000000;
+    const int FILE_SHARE_READ = 1, FILE_SHARE_WRITE = 2;
+    const uint OPEN_EXISTING = 3, FILE_FLAG_OVERLAPPED = 0x40000000;
+    const int DIGCF_PRESENT = 2, DIGCF_DEVICEINTERFACE = 0x10;
+    static readonly IntPtr INVALID = new IntPtr(-1);
+
+    static readonly ConcurrentQueue<string> queue = new ConcurrentQueue<string>();
+    static Thread worker;
+    static volatile bool running;
+    public static string Path = "";
+    public static string Error = "";
+
+    public static bool Start(int upage, int vid, int pid)
+    {
+        if (worker != null) return true;
+        string path = Find(upage, vid, pid);
+        if (path == null) return false;
+        Path = path;
+        running = true;
+        worker = new Thread(Loop);
+        worker.IsBackground = true;
+        worker.Start();
+        return true;
+    }
+
+    public static void Stop() { running = false; }
+
+    public static string Find(int upage, int vid, int pid)
+    {
+        GUID g; HidD_GetHidGuid(out g);
+        IntPtr set = SetupDiGetClassDevsW(ref g, IntPtr.Zero, IntPtr.Zero, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+        if (set == INVALID) return null;
+        string found = null;
+        try
+        {
+            int idx = 0;
+            while (true)
+            {
+                var did = new SP_DEVICE_INTERFACE_DATA();
+                did.cbSize = Marshal.SizeOf(typeof(SP_DEVICE_INTERFACE_DATA));
+                if (!SetupDiEnumDeviceInterfaces(set, IntPtr.Zero, ref g, idx, ref did)) break;
+                idx++;
+                int need;
+                SetupDiGetDeviceInterfaceDetailW(set, ref did, IntPtr.Zero, 0, out need, IntPtr.Zero);
+                if (need <= 0) continue;
+                IntPtr buf = Marshal.AllocHGlobal(need);
+                try
+                {
+                    Marshal.WriteInt32(buf, 0, IntPtr.Size == 8 ? 8 : 6);
+                    if (!SetupDiGetDeviceInterfaceDetailW(set, ref did, buf, need, out need, IntPtr.Zero)) continue;
+                    string path = Marshal.PtrToStringUni(new IntPtr(buf.ToInt64() + 4));
+                    if (string.IsNullOrEmpty(path)) continue;
+                    IntPtr h = CreateFileW(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+                    if (h == INVALID) continue;
+                    try
+                    {
+                        var attr = new HIDD_ATTRIBUTES();
+                        attr.Size = Marshal.SizeOf(typeof(HIDD_ATTRIBUTES));
+                        if (!HidD_GetAttributes(h, ref attr)) continue;
+                        if (vid > 0 && (attr.VendorID != vid || attr.ProductID != pid)) continue;
+                        IntPtr pp;
+                        if (!HidD_GetPreparsedData(h, out pp) || pp == IntPtr.Zero) continue;
+                        try
+                        {
+                            byte[] caps = new byte[256];
+                            if (HidP_GetCaps(pp, caps) != 0x00110000) continue;
+                            int up = BitConverter.ToUInt16(caps, 2);
+                            if (up != upage) continue;
+                            found = path;
+                        }
+                        finally { HidD_FreePreparsedData(pp); }
+                    }
+                    finally { CloseHandle(h); }
+                    if (found != null) break;
+                }
+                finally { Marshal.FreeHGlobal(buf); }
+            }
+        }
+        finally { SetupDiDestroyDeviceInfoList(set); }
+        return found;
+    }
+
+    static void Loop()
+    {
+        IntPtr h = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero,
+                               OPEN_EXISTING, FILE_FLAG_OVERLAPPED, IntPtr.Zero);
+        if (h == INVALID) { Error = "open-failed " + Marshal.GetLastWin32Error(); running = false; return; }
+        int len = 33;
+        var buf = new byte[65];
+        try
+        {
+            while (running)
+            {
+                int got = ReadWithTimeout(h, buf, len, 500);
+                if (got > 0)
+                {
+                    var sb = new StringBuilder();
+                    for (int i = 0; i < got; i++) sb.Append(buf[i].ToString("X2"));
+                    queue.Enqueue(sb.ToString() + "|" + DateTime.Now.ToString("HH:mm:ss"));
+                }
+                else if (got < 0 && running)
+                {
+                    Error = "read-failed " + Marshal.GetLastWin32Error();
+                    running = false;
+                }
+            }
+        }
+        finally { CloseHandle(h); }
+    }
+
+    static int ReadWithTimeout(IntPtr h, byte[] buf, int len, int ms)
+    {
+        IntPtr ev = CreateEventW(IntPtr.Zero, true, false, IntPtr.Zero);
+        if (ev == IntPtr.Zero) return -1;
+        IntPtr ov = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(OVERLAPPED)));
+        try
+        {
+            var o = new OVERLAPPED(); o.hEvent = ev;
+            Marshal.StructureToPtr(o, ov, false);
+            int read;
+            bool ok = ReadFile(h, buf, len, out read, ov);
+            if (!ok && Marshal.GetLastWin32Error() != 997) return -1;
+            if (WaitForSingleObject(ev, (uint)ms) != 0) { CancelIoEx(h, ov); return 0; }
+            int got;
+            if (!GetOverlappedResult(h, ov, out got, false)) return -1;
+            return got;
+        }
+        finally { Marshal.FreeHGlobal(ov); CloseHandle(ev); }
+    }
+
+    public static string[] Poll()
+    {
+        var list = new List<string>();
+        string s;
+        while (queue.TryDequeue(out s)) list.Add(s);
+        return list.ToArray();
+    }
+}
+'@
+
+function Start-UsbListener {
+    if ($script:UsbWorker) { return }
+    try {
+        if (-not ('HidBat' -as [type])) {
+            Add-Type -TypeDefinition $script:UsbCSharp -Language CSharp -ErrorAction Stop
+        }
+        $vid = 0; $pid_ = 0
+        if ($script:Cfg.UsbVid) { $vid = [Convert]::ToInt32(('0x' + $script:Cfg.UsbVid), 16) }
+        if ($script:Cfg.UsbPid) { $pid_ = [Convert]::ToInt32(('0x' + $script:Cfg.UsbPid), 16) }
+        $upage = [Convert]::ToInt32(('0x' + $script:Cfg.UsbUsagePage), 16)
+        if ([HidBat]::Start($upage, $vid, $pid_)) {
+            $script:UsbWorker = $true
+            Write-Log ('USB-START ' + [HidBat]::Path)
+        }
+        else { Write-Log 'USB-NOTFOUND' }
+    }
+    catch { Write-Log ('USB-INIT-ERR ' + $_.Exception.Message) }
+}
+
+function Update-UsbState {
+    if (-not $script:UsbWorker) { return }
+    $frames = [HidBat]::Poll()
+    $changed = $false
+    foreach ($f in $frames) {
+        $hex, $ts = $f -split '\|'
+        if ($hex.Length -lt 8) { continue }
+        $b = @()
+        for ($i = 0; $i -lt $hex.Length; $i += 2) { $b += [Convert]::ToByte($hex.Substring($i, 2), 16) }
+        if ($b.Count -lt 4) { continue }
+        if ($b[1] -ne 0xD1) {
+            if ($script:Cfg.Debug) { Write-Log ('USB-FRAME(ignored) ' + $hex) }
+            continue
+        }
+        $lv = [int]$b[3]
+        if ($lv -lt 0 -or $lv -gt 100) { continue }
+        if (-not $script:Usb.HasData -or $script:Usb.Level -ne $lv) { $changed = $true }
+        $script:Usb.HasData = $true
+        $script:Usb.Level = $lv
+        $script:Usb.At = Get-Date
+        # 收到任何 D1 帧就说明设备活着；[2]=0 只是待机/链路挂起，不当作断连
+        if (-not $script:Usb.Online) { $changed = $true }
+        $script:Usb.Online = $true
+        $script:Usb.Idle = ($b[2] -eq 0)
+        if ($script:Cfg.Debug) {
+            Write-Log ('USB-FRAME level={0} link={1} raw={2}' -f $lv, $b[2], $hex)
+        }
+        if ($script:Cfg.LastUsbLevel -ne $lv) { $script:Cfg.LastUsbLevel = $lv; Save-Config }
+    }
+
+    # 连续 180 秒没有任何帧，才认为真的关了 / 走远了（上报间隔实测约 1–1.5 分钟）
+    if ($script:Usb.HasData -and $script:Usb.Online) {
+        if (((Get-Date) - $script:Usb.At).TotalSeconds -gt 180) {
+            $script:Usb.Online = $false
+            $changed = $true
+            Write-Log 'USB-OFFLINE (no frame in 180s)'
+        }
+    }
+
+    if ($changed) { Update-Tray }
+}
+
+
 # ------------------------------------------------------------- 状态 ----
 $script:Cfg = Get-Config
 $script:State = @{
@@ -281,6 +546,9 @@ $script:State = @{
     LastSeen = $null; LastGoodUpdate = $null
     Devices = @()
 }
+# 2.4G 接收器状态（独立于 BLE）
+$script:UsbWorker = $false
+$script:Usb = @{ HasData = $false; Level = -1; Online = $false; At = $null; Idle = $false }
 $script:Worker = $null
 $script:WorkerHandle = $null
 $script:WorkerStart = [datetime]::MinValue
@@ -437,10 +705,32 @@ function Apply-ProbeResult {
 
 function Update-Tray {
     $s = $script:State
-    $online = [bool]$s.Online
-    $level = if ($online) { $s.Level } else { $s.LastLevel }
+    # 2.4G 接收器一旦上报过，就以它为准（两种连接方式互斥，谁有数据听谁的）
+    $usb = $script:UsbWorker -and $script:Usb.HasData
+    if ($usb) {
+        $mode = 'usb'
+        $online = [bool]$script:Usb.Online
+        $level = $script:Usb.Level
+        $lastLevel = $script:Usb.Level
+        $nm = if ($script:Cfg.DeviceName) { $script:Cfg.DeviceName } elseif ($s.Name) { $s.Name } else { $script:AppName }
+    }
+    elseif ($script:UsbWorker) {
+        # 接收器在，但还没收到过状态帧（设备只在事件发生时上报）
+        $mode = 'usb'
+        $online = $false
+        $level = if ($script:Cfg.LastUsbLevel -ge 0) { $script:Cfg.LastUsbLevel } else { -1 }
+        $lastLevel = $level
+        $nm = if ($script:Cfg.DeviceName) { $script:Cfg.DeviceName } elseif ($s.Name) { $s.Name } else { $script:AppName }
+    }
+    else {
+        $mode = $s.Mode
+        $online = [bool]$s.Online
+        $level = if ($online) { $s.Level } else { $s.LastLevel }
+        $lastLevel = $s.LastLevel
+        $nm = if ($s.Name) { $s.Name } else { $script:AppName }
+    }
 
-    $sig = '{0}|{1}|{2}' -f $s.Mode, $level, $online
+    $sig = '{0}|{1}|{2}' -f $mode, $level, $online
     if ($sig -ne $script:LastPainted) {
         $script:LastPainted = $sig
         try {
@@ -458,17 +748,17 @@ function Update-Tray {
         catch { Write-Log ('ICON-ERR ' + $_.Exception.Message) }
     }
 
-    $nm = if ($s.Name) { $s.Name } else { $script:AppName }
-    if ($online) { $tip = '{0} · 电量 {1}%' -f $nm, $level }
-    elseif ($s.LastLevel -ge 0) { $tip = '{0} · 已断开（最后 {1}%）' -f $nm, $s.LastLevel }
+    $tag = if ($mode -eq 'usb') { '（2.4G）' } else { '' }
+    if ($online) { $tip = '{0} · 电量 {1}%{2}' -f $nm, $level, $tag }
+    elseif ($lastLevel -ge 0) { $tip = '{0} · 已断开（最后 {1}%）' -f $nm, $lastLevel }
     else { $tip = '{0} · 未检测到设备' -f $script:AppName }
     if ($tip.Length -gt 60) { $tip = $tip.Substring(0, 60) }
     try { $script:NotifyIcon.Text = $tip } catch { }
 
     try {
-        if ($online) { $script:MenuHeader.Text = '  {0} · {1}%' -f $nm, $level }
-        elseif ($s.LastLevel -ge 0) { $script:MenuHeader.Text = '  {0} · 已断开（最后 {1}%）' -f $nm, $s.LastLevel }
-        elseif ($s.Mode -eq 'none') { $script:MenuHeader.Text = '  未检测到可用设备' }
+        if ($online) { $script:MenuHeader.Text = '  {0} · {1}%{2}' -f $nm, $level, $tag }
+        elseif ($lastLevel -ge 0) { $script:MenuHeader.Text = '  {0} · 已断开（最后 {1}%）' -f $nm, $lastLevel }
+        elseif ($mode -eq 'none') { $script:MenuHeader.Text = '  未检测到可用设备' }
         else { $script:MenuHeader.Text = '  {0} · 已断开' -f $nm }
     }
     catch { }
@@ -596,18 +886,34 @@ function New-Popup {
         $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
         $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
         $s = $script:State
-        $online = [bool]$s.Online
-        $level = if ($online) { $s.Level } else { $s.LastLevel }
+        $usbOn = $script:UsbWorker -and $script:Usb.HasData
+        if ($usbOn) {
+            $online = [bool]$script:Usb.Online
+            $level = $script:Usb.Level
+            $modeTag = 'usb'
+            $updAt = $script:Usb.At
+        }
+        else {
+            $online = [bool]$s.Online
+            $level = if ($online) { $s.Level } else { $s.LastLevel }
+            $modeTag = $s.Mode
+            $updAt = $s.LastGoodUpdate
+        }
         if ($level -lt 0) { $level = 0 }
         $accent = Get-StatusColor -Level $level -Online $online
         $brAccent = New-Object System.Drawing.SolidBrush($accent)
 
-        $name = if ($s.Name) { $s.Name } else { $script:AppName }
+        $name = if ($script:Cfg.DeviceName) { $script:Cfg.DeviceName } elseif ($s.Name) { $s.Name } else { $script:AppName }
         if ($name.Length -gt 18) { $name = $name.Substring(0, 17) + '…' }
         $g.DrawString($name, $script:FntTitle, $script:BrText, [single]18, [single]14)
 
-        if ($s.Mode -eq 'ble') {
+        if ($modeTag -eq 'ble') {
             $modeText = if ($online) { '蓝牙 LE · 已连接' } else { '蓝牙 LE · 已断开' }
+        }
+        elseif ($modeTag -eq 'usb') {
+            if (-not $online) { $modeText = '2.4G 接收器 · 已断开' }
+            elseif ($script:Usb.Idle) { $modeText = '2.4G 接收器 · 待机' }
+            else { $modeText = '2.4G 接收器 · 已连接' }
         }
         else { $modeText = '未检测到设备' }
         $g.DrawString($modeText, $script:FntSub, $script:BrSub, [single]18, [single]38)
@@ -627,8 +933,9 @@ function New-Popup {
         }
         $trackPath.Dispose()
 
-        $upd = if ($s.LastGoodUpdate) { $s.LastGoodUpdate.ToString('MM-dd HH:mm') } else { '—' }
-        $g.DrawString(('数据更新 {0}   ·   刷新 {1} 秒' -f $upd, $script:Cfg.RefreshSeconds),
+        $upd = if ($updAt) { $updAt.ToString('MM-dd HH:mm') } else { '—' }
+        $refreshText = if ($modeTag -eq 'usb') { '事件上报' } else { ('{0} 秒' -f $script:Cfg.RefreshSeconds) }
+        $g.DrawString(('数据更新 {0}   ·   {1}' -f $upd, $refreshText),
             $script:FntSub, $script:BrSub, [single]18, [single]88)
 
         if ($s.Mac) {
@@ -821,6 +1128,7 @@ Write-Log ('START pid={0} cfg={1}' -f $PID, $(if ($script:Cfg.DeviceId) { $scrip
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 1000
 $timer.Add_Tick({
+    Update-UsbState
     if ($script:Worker) { Complete-Probe }
     elseif ($script:PendingRefresh) { $script:PendingRefresh = $false; Start-Probe }
     elseif ($script:VerifyAt -and (Get-Date) -ge $script:VerifyAt) { $script:VerifyAt = $null; Start-Probe }
@@ -833,6 +1141,7 @@ $timer.Add_Tick({
 })
 $timer.Start()
 
+Start-UsbListener
 Start-Probe
 
 try {
