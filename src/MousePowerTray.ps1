@@ -11,10 +11,19 @@
     设计思路参考 Tan-TanZi/InphicBatteryTray。
 .PARAMETER SelfTest
     不开界面，扫描一次设备并把结果 / 图标预览写到 preview 目录后退出。
+.PARAMETER Diagnose
+    不开界面，生成诊断报告到桌面（压缩包），用于排查别人的设备为什么读不到电量。
+.PARAMETER Capture
+    配合 -Diagnose 使用：抓取厂商 HID 通道的原始帧若干秒，期间按提示操作鼠标。
+.PARAMETER CaptureSeconds
+    抓包时长，默认 60 秒。
 #>
 [CmdletBinding()]
 param(
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    [switch]$Diagnose,
+    [switch]$Capture,
+    [int]$CaptureSeconds = 60
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,6 +35,7 @@ Add-Type -AssemblyName System.Drawing
 # ---------------------------------------------------------------- 常量 ----
 $script:AppName = '鼠标电量'
 $script:AppId = 'MousePowerTray'
+$script:AppVersion = '1.2.0'
 $script:DevKey = '{104EA319-6EE2-4701-BD47-8DDBF425BBE5}'   # DEVPKEY_Bluetooth_Battery
 $script:RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $script:RunName = $script:AppId
@@ -71,12 +81,18 @@ function Get-DefaultConfig {
         LowPercent     = 15
         LowNotify      = $true
         Debug          = $false
-        # 2.4G 接收器（厂商私有通道）—— 换鼠标改这三项
-        UsbVid         = '089D'
-        UsbPid         = '062F'
-        UsbUsagePage   = 'FF02'
+        # 2.4G 接收器（厂商私有通道）
+        # 默认留空：不猜、不去碰别人的接收器。诊断报告会给出该填什么。
+        UsbVid         = ''
+        UsbPid         = ''
+        UsbUsagePage   = ''
+        # 帧结构：帧类型字节（十六进制，空=不过滤所有帧）、电量字节下标、链路标志下标
+        # D1 是 AULA 089D:062F 的状态帧；不过滤的话 D2 帧会被误当成电量
+        UsbFrameType   = 'D1'
+        UsbLevelIndex  = 3
+        UsbLinkIndex   = 2
         LastUsbLevel   = -1
-        Version        = 2
+        Version        = 3
     }
 }
 
@@ -299,6 +315,8 @@ public static class HidBat
     [StructLayout(LayoutKind.Sequential)]
     public struct SP_DEVICE_INTERFACE_DATA { public int cbSize; public GUID InterfaceClassGuid; public int Flags; public IntPtr Reserved; }
     [StructLayout(LayoutKind.Sequential)]
+    public struct SP_DEVINFO_DATA { public int cbSize; public GUID ClassGuid; public int DevInst; public IntPtr Reserved; }
+    [StructLayout(LayoutKind.Sequential)]
     public struct HIDD_ATTRIBUTES { public int Size; public ushort VendorID; public ushort ProductID; public ushort VersionNumber; }
     [StructLayout(LayoutKind.Sequential)]
     public struct OVERLAPPED { public IntPtr Internal; public IntPtr InternalHigh; public int Offset; public int OffsetHigh; public IntPtr hEvent; }
@@ -309,8 +327,15 @@ public static class HidBat
     static extern bool SetupDiEnumDeviceInterfaces(IntPtr s, IntPtr d, ref GUID g, int i, ref SP_DEVICE_INTERFACE_DATA x);
     [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern bool SetupDiGetDeviceInterfaceDetailW(IntPtr s, ref SP_DEVICE_INTERFACE_DATA x, IntPtr b, int n, out int r, IntPtr d);
+    // 带 DeviceInfoData 输出的版本：DeviceInfoData 是独立结构，不能指向 detail 缓冲区内部
+    [DllImport("setupapi.dll", EntryPoint = "SetupDiGetDeviceInterfaceDetailW", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool SetupDiGetDeviceInterfaceDetailX(IntPtr s, ref SP_DEVICE_INTERFACE_DATA x, IntPtr b, int n, out int r, ref SP_DEVINFO_DATA d);
     [DllImport("setupapi.dll", SetLastError = true)]
     static extern bool SetupDiDestroyDeviceInfoList(IntPtr s);
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool SetupDiGetDeviceInstanceIdW(IntPtr s, ref SP_DEVINFO_DATA d, StringBuilder id, int n, out int req);
+    [DllImport("hid.dll", CharSet = CharSet.Unicode)]
+    static extern bool HidD_GetProductString(IntPtr h, StringBuilder s, int n);
     [DllImport("hid.dll")]
     static extern void HidD_GetHidGuid(out GUID g);
     [DllImport("hid.dll", SetLastError = true)]
@@ -475,11 +500,149 @@ public static class HidBat
         while (queue.TryDequeue(out s)) list.Add(s);
         return list.ToArray();
     }
+
+    // ---- 诊断用：枚举本机全部 HID 接口，不限 VID / usage page ----
+    // 每行格式：VID|PID|UsagePage|Usage|In|Out|Feat|Product|InstanceId
+    public static string[] Enumerate()
+    {
+        var rows = new List<string>();
+        GUID g; HidD_GetHidGuid(out g);
+        IntPtr set = SetupDiGetClassDevsW(ref g, IntPtr.Zero, IntPtr.Zero, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+        if (set == INVALID) return new string[] { "ENUM-FAILED" };
+        try
+        {
+            int idx = 0;
+            while (true)
+            {
+                var did = new SP_DEVICE_INTERFACE_DATA();
+                did.cbSize = Marshal.SizeOf(typeof(SP_DEVICE_INTERFACE_DATA));
+                if (!SetupDiEnumDeviceInterfaces(set, IntPtr.Zero, ref g, idx, ref did)) break;
+                idx++;
+                int need;
+                SetupDiGetDeviceInterfaceDetailW(set, ref did, IntPtr.Zero, 0, out need, IntPtr.Zero);
+                if (need <= 0) continue;
+                IntPtr buf = Marshal.AllocHGlobal(need);
+                try
+                {
+                    Marshal.WriteInt32(buf, 0, IntPtr.Size == 8 ? 8 : 6);
+                    var devInfo = new SP_DEVINFO_DATA();
+                    devInfo.cbSize = Marshal.SizeOf(typeof(SP_DEVINFO_DATA));
+                    if (!SetupDiGetDeviceInterfaceDetailX(set, ref did, buf, need, out need, ref devInfo)) continue;
+                    // DevicePath 偏移随位数变化，两种布局都试一次，认 \\?\ 开头的那份
+                    string path = Marshal.PtrToStringUni(new IntPtr(buf.ToInt64() + 8));
+                    if (string.IsNullOrEmpty(path) || !path.StartsWith("\\\\?\\"))
+                        path = Marshal.PtrToStringUni(new IntPtr(buf.ToInt64() + 4));
+                    if (string.IsNullOrEmpty(path)) continue;
+
+                    string inst = "";
+                    var sbId = new StringBuilder(512);
+                    int req;
+                    if (SetupDiGetDeviceInstanceIdW(set, ref devInfo, sbId, 512, out req)) inst = sbId.ToString().Trim();
+
+                    IntPtr h = CreateFileW(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+                    if (h == INVALID) continue;
+                    try
+                    {
+                        var attr = new HIDD_ATTRIBUTES();
+                        attr.Size = Marshal.SizeOf(typeof(HIDD_ATTRIBUTES));
+                        if (!HidD_GetAttributes(h, ref attr)) continue;
+                        var sbName = new StringBuilder(256);
+                        string prod = "";
+                        if (HidD_GetProductString(h, sbName, 256)) prod = sbName.ToString().Trim();
+                        int up = -1, usg = -1, inLen = 0, outLen = 0, featLen = 0;
+                        IntPtr pp;
+                        if (HidD_GetPreparsedData(h, out pp) && pp != IntPtr.Zero)
+                        {
+                            try
+                            {
+                                byte[] caps = new byte[256];
+                                if (HidP_GetCaps(pp, caps) == 0x00110000)
+                                {
+                                    usg = BitConverter.ToUInt16(caps, 0);
+                                    up = BitConverter.ToUInt16(caps, 2);
+                                    inLen = BitConverter.ToUInt16(caps, 4);
+                                    outLen = BitConverter.ToUInt16(caps, 6);
+                                    featLen = BitConverter.ToUInt16(caps, 8);
+                                }
+                            }
+                            finally { HidD_FreePreparsedData(pp); }
+                        }
+                        rows.Add(string.Format("{0:X4}|{1:X4}|{2:X4}|{3:X4}|{4}|{5}|{6}|{7}|{8}",
+                            attr.VendorID, attr.ProductID, up, usg, inLen, outLen, featLen,
+                            prod.Replace("|", "/"), inst));
+                    }
+                    finally { CloseHandle(h); }
+                }
+                finally { Marshal.FreeHGlobal(buf); }
+            }
+        }
+        finally { SetupDiDestroyDeviceInfoList(set); }
+        return rows.ToArray();
+    }
+
+    // ---- 诊断用：同时监听多条厂商通道，把每一帧带时间戳交给回调 ----
+    // targets 每项为 "usagePage:int,len:int"，返回实际启动了几条
+    static volatile bool capturing = false;
+        public static string CapError = "";
+
+    public static int CaptureStart(string[] targets)
+    {
+        StopCapture();
+        capturing = true;
+        int ok = 0;
+        foreach (var t in targets)
+        {
+            var parts = t.Split(':');
+            int upage = int.Parse(parts[0]), len = int.Parse(parts[1]);
+            string path = Find(upage, 0, 0);
+            if (path == null) continue;
+            IntPtr h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero,
+                                   OPEN_EXISTING, FILE_FLAG_OVERLAPPED, IntPtr.Zero);
+            if (h == INVALID) { CapError += "open " + upage.ToString("X4") + " err=" + Marshal.GetLastWin32Error() + "; "; continue; }
+            var arg = new object[] { h, len, upage };
+            var th = new Thread(CaptureLoop);
+            th.IsBackground = true;
+            th.Start(arg);
+            ok++;
+        }
+        if (ok == 0) capturing = false;
+        return ok;
+    }
+
+    public static bool IsCapturing { get { return capturing; } }
+
+    static void CaptureLoop(object arg)
+    {
+        var a = (object[])arg;
+        IntPtr h = (IntPtr)a[0];
+        int len = (int)a[1];
+        int upage = (int)a[2];
+        var buf = new byte[4096];
+        try
+        {
+            while (capturing)
+            {
+                int got = ReadWithTimeout(h, buf, len == 0 ? 64 : len, 400);
+                if (got > 0)
+                {
+                    var sb = new StringBuilder();
+                    for (int i = 0; i < got; i++) sb.Append(buf[i].ToString("X2"));
+                    queue.Enqueue(string.Format("CAP|{0:X4}|{1}|{2}", upage, sb.ToString(), DateTime.Now.ToString("HH:mm:ss.fff")));
+                }
+            }
+        }
+        catch (Exception ex) { CapError = CapError + ex.Message + "; "; }
+        finally { CloseHandle(h); }
+    }
+
+    public static void StopCapture() { capturing = false; }
 }
 '@
 
 function Start-UsbListener {
     if ($script:UsbWorker) { return }
+    # 没有配置厂商通道就完全不碰 USB —— 默认不去猜别人的接收器
+    if (-not $script:Cfg.UsbUsagePage) { return }
     try {
         if (-not ('HidBat' -as [type])) {
             Add-Type -TypeDefinition $script:UsbCSharp -Language CSharp -ErrorAction Stop
@@ -513,28 +676,40 @@ function Update-UsbState {
     catch { }
     $frames = [HidBat]::Poll()
     $changed = $false
+    # 帧格式做成可配置的：换一个品牌的接收器时，多数情况只要改
+    # UsbFrameType / UsbLevelIndex / UsbLinkIndex 就能用，不必改代码。
+    $typeWant = -1
+    if ($script:Cfg.UsbFrameType) {
+        try { $typeWant = [Convert]::ToInt32($script:Cfg.UsbFrameType, 16) } catch { $typeWant = -1 }
+    }
+    $lvIdx = 3; $lkIdx = 2
+    try { if ($null -ne $script:Cfg.UsbLevelIndex) { $lvIdx = [int]$script:Cfg.UsbLevelIndex } } catch { }
+    try { if ($null -ne $script:Cfg.UsbLinkIndex) { $lkIdx = [int]$script:Cfg.UsbLinkIndex } } catch { }
+
     foreach ($f in $frames) {
         $hex, $ts = $f -split '\|'
         if ($hex.Length -lt 8) { continue }
         $b = @()
         for ($i = 0; $i -lt $hex.Length; $i += 2) { $b += [Convert]::ToByte($hex.Substring($i, 2), 16) }
         if ($b.Count -lt 4) { continue }
-        if ($b[1] -ne 0xD1) {
+        if ($typeWant -ge 0 -and $b.Count -gt 1 -and $b[1] -ne $typeWant) {
             if ($script:Cfg.Debug) { Write-Log ('USB-FRAME(ignored) ' + $hex) }
             continue
         }
-        $lv = [int]$b[3]
+        if ($lvIdx -lt 0 -or $lvIdx -ge $b.Count) { continue }
+        $lv = [int]$b[$lvIdx]
         if ($lv -lt 0 -or $lv -gt 100) { continue }
+        $link = if ($lkIdx -ge 0 -and $lkIdx -lt $b.Count) { [int]$b[$lkIdx] } else { 1 }
         if (-not $script:Usb.HasData -or $script:Usb.Level -ne $lv) { $changed = $true }
         $script:Usb.HasData = $true
         $script:Usb.Level = $lv
         $script:Usb.At = Get-Date
-        # 收到任何 D1 帧就说明设备活着；[2]=0 只是待机/链路挂起，不当作断连
+        # 收到任何有效帧就说明设备活着；链路位为 0 只是待机，不当作断连
         if (-not $script:Usb.Online) { $changed = $true }
         $script:Usb.Online = $true
-        $script:Usb.Idle = ($b[2] -eq 0)
+        $script:Usb.Idle = ($link -eq 0)
         if ($script:Cfg.Debug) {
-            Write-Log ('USB-FRAME level={0} link={1} raw={2}' -f $lv, $b[2], $hex)
+            Write-Log ('USB-FRAME level={0} link={1} raw={2}' -f $lv, $link, $hex)
         }
         if ($script:Cfg.LastUsbLevel -ne $lv) { $script:Cfg.LastUsbLevel = $lv; Save-Config }
     }
@@ -1010,6 +1185,419 @@ function Stop-App {
     [System.Windows.Forms.Application]::ExitThread()
 }
 
+# ------------------------------------------------------------- 诊断 ----
+# 目的：别人的鼠标在这个工具上不工作时，一次性收集足够判定"能不能支持、
+# 怎么支持"的信息，而不是让对方在命令行里瞎试。
+function Initialize-HidType {
+    if ('HidBat' -as [type]) { return $true }
+    try {
+        Add-Type -TypeDefinition $script:UsbCSharp -Language CSharp -ErrorAction Stop
+        return $true
+    }
+    catch {
+        Write-Log ('HID-TYPE-ERR ' + $_.Exception.Message)
+        return $false
+    }
+}
+
+function Get-DiagBle {
+    $rows = New-Object System.Collections.ArrayList
+    $devs = @(Get-PnpDevice -Class Bluetooth -PresentOnly -ErrorAction SilentlyContinue |
+              Where-Object { $_.InstanceId -like 'BTHLE\*' })
+    foreach ($d in $devs) {
+        $lv = ''; $up = ''; $name = $d.FriendlyName
+        try {
+            $p = Get-PnpDeviceProperty -InstanceId $d.InstanceId -ErrorAction SilentlyContinue
+            $k2 = $script:DevKey + ' 2'
+            $k7 = $script:DevKey + ' 7'
+            $lv = ($p | Where-Object { $_.KeyName -eq $k2 }).Data
+            $up = ($p | Where-Object { $_.KeyName -eq $k7 }).Data
+            $fn = ($p | Where-Object { $_.KeyName -eq 'DEVPKEY_Device_FriendlyName' }).Data
+            if ($fn) { $name = ([string]$fn).Trim() }
+        }
+        catch { }
+        $mac = ''
+        if ($d.InstanceId -match 'DEV_([0-9A-Fa-f]{12})') { $mac = $Matches[1] }
+        [void]$rows.Add([pscustomobject]@{
+            Name = $name
+            Mac = $mac
+            Level = $(if ($lv -eq '' -or $lv -eq $null) { $null } else { [int]$lv })
+            Updated = $up
+        })
+    }
+    return $rows
+}
+
+function Get-DiagUsb {
+    # 返回全部 HID 接口（含键鼠本体），供人眼判断哪个是接收器的厂商通道
+    $rows = New-Object System.Collections.ArrayList
+    if (-not (Initialize-HidType)) { return $rows }
+    foreach ($line in [HidBat]::Enumerate()) {
+        if ($line -eq 'ENUM-FAILED') { continue }
+        $f = $line -split '\|'
+        if ($f.Count -lt 9) { continue }
+        $inst = $f[8]
+        # 只有 USB HID 才可能是 2.4G 接收器；触摸板/蓝牙/I2C 直连都不是
+        $bus = 'other'
+        if ($inst -like 'USB\*' -or $inst -like 'HID\VID_*') { $bus = 'usb' }
+        elseif ($inst -like 'HIDI2C\*' -or $inst -like 'ACPI\*') { $bus = 'i2c' }
+        elseif ($inst -like 'BTHLE\*' -or $inst -like 'BTHLEDEVICE\*' -or $inst -like 'BTHENUM\*') { $bus = 'ble' }
+        if ($f[0] -eq '0000' -and $f[1] -eq '0000') { $bus = 'novid' }
+        [void]$rows.Add([pscustomobject]@{
+            Vid = $f[0]; Pid = $f[1]; Upage = $f[2]; Usage = $f[3]
+            In = [int]$f[4]; Out = [int]$f[5]; Feat = [int]$f[6]
+            Product = $f[7]; InstanceId = $inst; Bus = $bus
+        })
+    }
+    return $rows
+}
+
+function Get-DiagConclusion {
+    param($Ble, $Usb)
+
+    $bleWithLevel = @($Ble | Where-Object { $null -ne $_.Level })
+    $bleNoLevel = @($Ble | Where-Object { $null -eq $_.Level })
+    # 厂商自定义通道：usage page 0xFF00 以上。
+    # 但只有走 USB 的才算 2.4G 接收器 —— 触摸板也常带 0xFF00 通道，
+    # 不排除掉的话笔记本上会误判成"检测到接收器"。
+    $allVendor = @($Usb | Where-Object { [Convert]::ToInt32($_.Upage, 16) -ge 0xFF00 })
+    $vendor = @($allVendor | Where-Object { $_.Bus -eq 'usb' })
+    $otherVendor = @($allVendor | Where-Object { $_.Bus -ne 'usb' })
+    # 按 VID:PID 归组，一个接收器通常有多个接口
+    $vendorGroups = @($vendor | Group-Object { '{0}:{1}' -f $_.Vid, $_.Pid })
+
+    $out = New-Object System.Collections.ArrayList
+
+    if ($bleWithLevel.Count -gt 0) {
+        [void]$out.Add('结论：蓝牙模式下【本来就能用】，不需要适配。')
+        [void]$out.Add('')
+        [void]$out.Add('系统里已经存在可读的蓝牙电量：')
+        foreach ($d in $bleWithLevel) {
+            [void]$out.Add(('  {0}  {1}%  更新于 {2}' -f $d.Name, $d.Level, $d.Updated))
+        }
+        [void]$out.Add('')
+        if ($vendorGroups.Count -gt 0) {
+            $vn = (($vendorGroups | ForEach-Object { $_.Name }) -join ', ')
+            [void]$out.Add(('注意：同时还插着 2.4G 接收器（{0}）。' -f $vn))
+            [void]$out.Add('两种模式只能各读各的：切到 2.4G 后需要按「2.4G 适配」那一节单独处理。')
+            [void]$out.Add('')
+        }
+        [void]$out.Add('如果托盘仍显示"未检测到设备"或数字不动，按顺序排查：')
+        [void]$out.Add('  1. 右键托盘 →「选择设备…」，看有没有列出这台鼠标')
+        [void]$out.Add('  2. 右键托盘 →「立即刷新」')
+        [void]$out.Add('  3. 确认鼠标是蓝牙连接（不是插着 2.4G 接收器）')
+        [void]$out.Add('  4. 数字不变属于正常：只有鼠标主动上报时系统才更新缓存')
+        return $out
+    }
+
+    if ($vendorGroups.Count -gt 0) {
+        [void]$out.Add('结论：检测到【2.4G 接收器】，需要针对厂商协议适配。')
+        [void]$out.Add('')
+        [void]$out.Add('蓝牙侧没有可读电量，但 USB 侧存在厂商自定义通道：')
+        foreach ($g in $vendorGroups) {
+            $first = @($g.Group)[0]
+            [void]$out.Add(('  {0}  "{1}"  {2} 条厂商通道' -f $g.Name, $first.Product, $g.Count))
+            foreach ($u in $g.Group) {
+                [void]$out.Add(('     usagePage 0x{0}  in={1} out={2} feature={3}' -f $u.Upage, $u.In, $u.Out, $u.Feat))
+            }
+        }
+        [void]$out.Add('')
+        [void]$out.Add('这属于"能适配"的情况，但必须先抓到帧。请在收集时加抓包参数：')
+        [void]$out.Add('  MousePowerTray.ps1 -Diagnose -Capture')
+        [void]$out.Add('抓包期间按提示操作鼠标（开关电源 / 按 DPI 键），抓到的原始帧在')
+        [void]$out.Add('capture.txt 里，据此可以定位电量字节。')
+        [void]$out.Add('')
+        $first = @($vendorGroups[0].Group)[0]
+        [void]$out.Add('适配后 config.json 需要写：')
+        [void]$out.Add(('  "UsbVid": "{0}",  "UsbPid": "{1}",  "UsbUsagePage": "{2}"' -f $first.Vid, $first.Pid, $first.Upage))
+        return $out
+    }
+
+    if ($bleNoLevel.Count -gt 0) {
+        [void]$out.Add('结论：这是蓝牙 LE 设备，但【没有暴露标准电池服务】，无法支持。')
+        [void]$out.Add('')
+        [void]$out.Add('系统识别到了 BLE 设备，但读不到电池服务 0x180F：')
+        foreach ($d in $bleNoLevel) {
+            [void]$out.Add(('  {0}  {1}' -f $d.Name, $d.Mac))
+        }
+        [void]$out.Add('')
+        [void]$out.Add('有的设备有 0x180F 服务节点却没被系统采到值，这种情况可以试：')
+        [void]$out.Add('  1. 在系统设置里断开再重连设备')
+        [void]$out.Add('  2. 重启蓝牙服务（管理员）：Restart-Service bthserv')
+        [void]$out.Add('  3. 重新收集一次本报告，看电量是否出现')
+        return $out
+    }
+
+    [void]$out.Add('结论：既没有蓝牙电量，也没有厂商自定义通道 —— 无法支持。')
+    [void]$out.Add('')
+    [void]$out.Add('可能原因：')
+    [void]$out.Add('  · 鼠标当前没连上（蓝牙未连接、接收器没插）')
+    [void]$out.Add('  · 鼠标走纯经典蓝牙（BR/EDR），电量只在 HFP 通道里')
+    [void]$out.Add('  · 设备用了专用驱动，HID 接口被独占')
+    if ($otherVendor.Count -gt 0) {
+        [void]$out.Add('')
+        [void]$out.Add('（另有 ' + $otherVendor.Count + ' 条非 USB 的厂商通道，通常来自触摸板，与本问题无关）')
+    }
+    return $out
+}
+
+function Get-FrameDigest {
+    # 把抓到的 CAP 行整理成"人＋机器都能读"的摘要。
+    # 关键：不同类型的状态帧（D1/D2/…）字节含义完全不同，
+    # 必须按「通道 + 长度 + 前两字节」先分组，组内统计才有意义。
+    param($Cap)
+    $out = New-Object System.Collections.ArrayList
+    if (-not $Cap -or @($Cap).Count -eq 0) { return $out }
+
+    $groups = @{}
+    foreach ($f in $Cap) {
+        $p = $f -split '\|'
+        if ($p.Count -lt 3) { continue }
+        $up = $p[1]; $hex = $p[2]
+        $n = [int]($hex.Length / 2)
+        if ($n -eq 0) { continue }
+        $head = if ($hex.Length -ge 4) { $hex.Substring(0, 4) } else { $hex }
+        $key = '{0}|{1}|{2}' -f $up, $n, $head
+        if (-not $groups.ContainsKey($key)) { $groups[$key] = New-Object System.Collections.ArrayList }
+        [void]$groups[$key].Add($hex)
+    }
+
+    $rank = 0
+    foreach ($k in ($groups.Keys | Sort-Object)) {
+        $parts = $k -split '\|'
+        $frames = $groups[$k]
+        $rank++
+        [void]$out.Add(('  [类型{0}] 通道 0x{1}  {2} 字节  首 2 字节 0x{3}  共 {4} 帧' -f
+            $rank, $parts[0], $parts[1], $parts[2], $frames.Count))
+        $byteCount = [int]$parts[1]
+
+        if ($frames.Count -le 1) {
+            $first = $frames[0]
+            $pretty = ''
+            for ($q = 0; $q -lt $first.Length; $q += 2) { $pretty += $first.Substring($q, 2) + ' ' }
+            [void]$out.Add('      只出现 1 次，无法比对：' + $pretty.Trim())
+            continue
+        }
+
+        $fixedShown = 0
+        for ($bi = 0; $bi -lt $byteCount; $bi++) {
+            $mn = 255; $mx = 0
+            foreach ($hf in $frames) {
+                if ($hf.Length -lt ($bi * 2 + 2)) { continue }
+                $v = [Convert]::ToByte($hf.Substring($bi * 2, 2), 16)
+                if ($v -lt $mn) { $mn = $v }
+                if ($v -gt $mx) { $mx = $v }
+            }
+            if ($mn -gt $mx) { continue }
+            # 判定顺序很重要：先排除开关位，再谈电量候选
+            $note = ''
+            if ($mn -eq $mx) {
+                if ($mn -eq 0 -or $mn -gt 100) { continue }
+                if ($fixedShown -ge 3) { continue }
+                $fixedShown++
+                $note = '  固定值（本次没变，仅供参考）'
+            }
+            elseif ($mx -le 1) { $note = '  0/1 开关位（连接状态之类）' }
+            elseif ($mx -le 100) { $note = '  值域 0-100  <<< 最可能是电量' }
+            [void]$out.Add(('      [{0,2}]  0x{1:X2}..0x{2:X2}  ({3,3}..{4,3}){5}' -f $bi, $mn, $mx, $mn, $mx, $note))
+        }
+    }
+    return $out
+}
+
+function Invoke-Diagnose {
+    param([int]$CaptureSeconds = 0)
+
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    if (-not $desktop) { $desktop = $script:DataDir }
+    $outDir = Join-Path $desktop ('MousePowerTray-诊断-' + $stamp)
+    New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+
+    $L = New-Object System.Collections.ArrayList
+    # 用户名脱敏：报告要发给别人，路径里的账户名没必要带出去
+    $uname = $env:USERNAME
+    $add = {
+        param($t)
+        $s = [string]$t
+        if ($uname) { $s = $s.Replace($uname, '***') }
+        [void]$L.Add($s)
+    }
+
+    & $add '================ MousePowerTray 诊断报告 ================'
+    & $add ('生成时间   : ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
+    & $add ('计算机名   : ' + $env:COMPUTERNAME)
+    & $add ('Windows    : ' + [System.Environment]::OSVersion.VersionString)
+    & $add ('PowerShell : ' + $PSVersionTable.PSVersion.ToString())
+    & $add ('程序版本   : ' + $script:AppVersion)
+    & $add ('配置       : ' + $script:CfgPath)
+    & $add ('当前模式   : ' + $(if ($script:Cfg.UsbVid) { '已配置 2.4G (' + $script:Cfg.UsbVid + ':' + $script:Cfg.UsbPid + ' usage 0x' + $script:Cfg.UsbUsagePage + ')' } else { '未配置 2.4G' }))
+    & $add ''
+    & $add '--- 配置内容 ---'
+    try {
+        foreach ($line in (Get-Content -LiteralPath $script:CfgPath -Raw -Encoding UTF8) -split "`r?`n") {
+            & $add ('  ' + $line)
+        }
+    }
+    catch { & $add '  （读取失败）' }
+    & $add ''
+
+    # ---- 蓝牙 ----
+    & $add '--- 一、蓝牙 LE 设备（BTHLE 节点）---'
+    $ble = @(Get-DiagBle)
+    if ($ble.Count -eq 0) { & $add '  （没有找到任何 BLE 设备节点）' }
+    else {
+        foreach ($d in $ble) {
+            $lvTxt = if ($null -ne $d.Level) { ('{0}%' -f $d.Level) } else { '(无电量属性)' }
+            & $add ('  {0,-26} {1,-12} {2}   更新: {3}' -f $d.Name, $d.Mac, $lvTxt, $d.Updated)
+        }
+    }
+    & $add ''
+
+    # ---- 经典蓝牙 ----
+    & $add '--- 二、经典蓝牙设备（BTHENUM 节点，仅列出名字）---'
+    $enum = @(Get-PnpDevice -Class Bluetooth -PresentOnly -ErrorAction SilentlyContinue |
+              Where-Object { $_.InstanceId -like 'BTHENUM\*' })
+    if ($enum.Count -eq 0) { & $add '  （无）' }
+    else { foreach ($d in $enum) { & $add ('  ' + $d.FriendlyName + '   [' + $d.Status + ']') } }
+    & $add ''
+
+    # ---- HID ----
+    & $add '--- 三、HID 接口清单 ---'
+    $usb = @(Get-DiagUsb)
+    if ($usb.Count -eq 0) { & $add '  （枚举失败，见下方错误）' }
+    else {
+        & $add '  总线  VID:PID   UsagePage Usage  In Out Feat  产品名'
+        foreach ($u in $usb) {
+            $mark = ''
+            if ([Convert]::ToInt32($u.Upage, 16) -ge 0xFF00) {
+                if ($u.Bus -eq 'usb') { $mark = '  <= 厂商通道(USB)' }
+                else { $mark = '  <= 厂商通道(' + $u.Bus + '，非接收器)' }
+            }
+            elseif ($u.Bus -eq 'novid') { $mark = '  （蓝牙 HID，无 VID）' }
+            & $add ('  {0,-5} {1}:{2}  0x{3,-6} 0x{4,-4} {5,3} {6,3} {7,4}  {8}{9}' -f
+                $u.Bus, $u.Vid, $u.Pid, $u.Upage, $u.Usage, $u.In, $u.Out, $u.Feat, $u.Product, $mark)
+        }
+        & $add ''
+        & $add '  厂商通道的设备实例（适配 2.4G 时要用到的）:'
+        $anyUsb = $false
+        foreach ($u in $usb) {
+            if ([Convert]::ToInt32($u.Upage, 16) -ge 0xFF00 -and $u.Bus -eq 'usb') {
+                & $add ('    0x{0}  {1}' -f $u.Upage, $u.InstanceId)
+                $anyUsb = $true
+            }
+        }
+        if (-not $anyUsb) { & $add '    （没有 USB 厂商通道）' }
+    }
+    & $add ''
+
+    # ---- 结论 ----
+    & $add '--- 四、自动判定 ---'
+    foreach ($line in (Get-DiagConclusion -Ble $ble -Usb $usb)) { & $add $line }
+    & $add ''
+
+    # ---- 抓包 ----
+    if ($CaptureSeconds -gt 0) {
+        & $add ('--- 五、厂商通道抓包（{0} 秒）---' -f $CaptureSeconds)
+        $vendor = @($usb | Where-Object { [Convert]::ToInt32($_.Upage, 16) -ge 0xFF00 -and $_.Bus -eq 'usb' })
+        if ($vendor.Count -eq 0) {
+            & $add '  没有 USB 厂商通道，跳过抓包。'
+        }
+        elseif (-not (Initialize-HidType)) {
+            & $add '  HID 类型加载失败，跳过。'
+        }
+        else {
+            $targets = @()
+            foreach ($v in $vendor) {
+                $inc = if ($v.In -gt 0) { $v.In } else { 64 }
+                $targets += ('{0}:{1}' -f [Convert]::ToInt32($v.Upage, 16), $inc)
+            }
+            $n = [HidBat]::CaptureStart($targets)
+            & $add ('  已启动 {0} 条通道：{1}' -f $n, ($targets -join ', '))
+            if ([HidBat]::CapError) { & $add ('  错误: ' + [HidBat]::CapError) }
+
+            Write-Host ''
+            Write-Host '  抓包中…… 请现在操作鼠标：' -ForegroundColor Cyan
+            Write-Host '    · 关掉鼠标电源，等 3 秒，再打开（最重要）' -ForegroundColor Cyan
+            Write-Host '    · 按几下 DPI 键 / 模式切换键' -ForegroundColor Cyan
+            Write-Host ''
+
+            $cap = New-Object System.Collections.ArrayList
+            $end = (Get-Date).AddSeconds($CaptureSeconds)
+            while ((Get-Date) -lt $end) {
+                Start-Sleep -Milliseconds 400
+                foreach ($f in [HidBat]::Poll()) {
+                    if ($f -like 'CAP|*') { [void]$cap.Add($f) }
+                }
+                $left = [int]($end - (Get-Date)).TotalSeconds
+                Write-Progress -Activity '抓包中' -Status ("剩余 {0} 秒，已收到 {1} 帧" -f [Math]::Max(0, $left), $cap.Count) `
+                    -PercentComplete ([Math]::Min(100, 100 * $cap.Count / 20))
+            }
+            Write-Progress -Activity '抓包中' -Completed
+            [HidBat]::StopCapture()
+
+            & $add ('  共收到 {0} 帧' -f $cap.Count)
+            if ($cap.Count -eq 0) {
+                & $add '  一帧都没有。该设备可能只在主机主动查询时才回应（需要发命令，另议）。'
+            }
+            else {
+                # 帧格式初判交给 Get-FrameDigest，便于单独验证
+                & $add ''
+                & $add '  —— 帧格式初判（同一类帧内，按字节位置统计取值范围）——'
+                foreach ($dl in (Get-FrameDigest -Cap $cap)) { & $add $dl }
+                & $add ''
+                & $add '  判读方法：关掉鼠标电源时归零、开机后回到几十的那个字节就是电量。'
+                & $add '  若所有字节都固定不动，说明这次没抓到状态变化，需要重抓。'
+                & $add '  同一个类型里出现多个 0-100 的候选时，对照系统设置页显示的电量'
+                & $add '  数字就能锁定是哪一个 —— 发送报告时把那个数字一起说明即可。'
+            }
+            $capFile = Join-Path $outDir 'capture.txt'
+            $cap | Set-Content -LiteralPath $capFile -Encoding UTF8
+            & $add ('  原始帧     : capture.txt')
+        }
+    }
+
+    # ---- 日志 ----
+    if (Test-Path -LiteralPath $script:LogPath) {
+        Copy-Item -LiteralPath $script:LogPath -Destination (Join-Path $outDir 'tray.log') -Force
+        & $add ''
+        & $add '--- 六、日志 ---'
+        & $add '  已附带 tray.log（最近的运行记录）'
+    }
+
+    $reportPath = Join-Path $outDir '诊断报告.txt'
+    $L | Set-Content -LiteralPath $reportPath -Encoding UTF8
+
+    # 控制台也打一份，方便命令行直接看
+    $L | ForEach-Object { Write-Host $_ }
+
+    # 打包，方便直接发出去
+    $zip = $outDir + '.zip'
+    try {
+        Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+        Compress-Archive -Path (Join-Path $outDir '*') -DestinationPath $zip -CompressionLevel Optimal
+        if (Test-Path -LiteralPath $zip) {
+            Remove-Item -LiteralPath $outDir -Recurse -Force -ErrorAction SilentlyContinue
+            $outDir = $zip
+        }
+    }
+    catch { }
+
+    return $outDir
+}
+
+# ------------------------------------------------------------- 诊断路由 ----
+if ($Diagnose) {
+    $secs = if ($Capture) { [Math]::Max(5, $CaptureSeconds) } else { 0 }
+    Write-Log ('DIAGNOSE start capture={0}s' -f $secs)
+    $path = Invoke-Diagnose -CaptureSeconds $secs
+    Write-Host ''
+    Write-Host ('诊断包已生成：' + $path) -ForegroundColor Green
+    Write-Host '把这个文件发给开发者即可，里面不含任何个人数据。' -ForegroundColor DarkGray
+    try { Start-Process explorer.exe ('/select,"' + $path + '"') } catch { }
+    exit 0
+}
+
 # ------------------------------------------------------------- 自检 ----
 if ($SelfTest) {
     Write-Log 'SELFTEST start'
@@ -1106,6 +1694,7 @@ $miAuto = $menu.Items.Add('开机自动启动')
 $miAuto.CheckOnClick = $true
 $miAuto.Checked = Get-Autostart
 [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+$miDiag = $menu.Items.Add('读不到电量？收集诊断信息…')
 $miLog = $menu.Items.Add('打开日志')
 $miExit = $menu.Items.Add('退出')
 $script:NotifyIcon.ContextMenuStrip = $menu
@@ -1132,6 +1721,38 @@ $miRefresh.Add_Click({
     if ($script:Worker) { $script:PendingRefresh = $true } else { Start-Probe }
 })
 $miAuto.Add_Click({ Set-Autostart -Enable ([bool]$miAuto.Checked) })
+$miDiag.Add_Click({
+    $msg = @"
+这会把本机的蓝牙 / HID 设备信息和最近日志打包成一个 zip 放到桌面，
+其中不含个人文件，账户名已打码。
+
+如果鼠标走的是 2.4G 接收器，还会监听 30 秒设备通道 —— 期间请：
+  1. 关掉鼠标电源，等 3 秒，再打开
+  2. 按几下 DPI 键
+
+会打开一个窗口显示进度，不要关它。
+
+继续吗？
+"@
+    $r = [System.Windows.Forms.MessageBox]::Show($msg, '收集诊断信息',
+        [System.Windows.Forms.MessageBoxButtons]::OKCancel,
+        [System.Windows.Forms.MessageBoxIcon]::Information)
+    if ($r -ne 'OK') { return }
+    # 起独立进程跑，避免抓包时托盘界面卡住
+    $ps1 = Join-Path $script:Root 'MousePowerTray.ps1'
+    try {
+        Start-Process -FilePath 'powershell.exe' -ArgumentList @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $ps1 + '"'),
+            '-Diagnose', '-Capture', '-CaptureSeconds', '30')
+        Write-Log 'DIAGNOSE launched from tray'
+    }
+    catch {
+        Write-Log ('DIAGNOSE-LAUNCH-ERR ' + $_.Exception.Message)
+        [void][System.Windows.Forms.MessageBox]::Show(
+            "启动失败：$($_.Exception.Message)`n`n可以手动运行：`n$ps1 -Diagnose",
+            '收集诊断信息', 'OK', 'Warning')
+    }
+})
 $miLog.Add_Click({ if (Test-Path -LiteralPath $script:LogPath) { Start-Process notepad.exe $script:LogPath } })
 $miExit.Add_Click({ Stop-App })
 
