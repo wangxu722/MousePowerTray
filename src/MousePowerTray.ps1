@@ -229,8 +229,12 @@ $script:ProbeBlock = {
                        Where-Object { $_.InstanceId -like 'BTHLE\*' })
             $out.BleCount = $nodes.Count
 
-            # 一次 CIM 查询拿全，避免每台设备查一次
-            $all = @(Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction SilentlyContinue)
+            # 在线判定只能看真正的 HID 设备实例（InstanceId 以 HID\ 开头）。
+            # BTHLEDEVICE\{00001812} 这类 GATT 服务节点即使设备断电也留在系统里，
+            # BTHLE\DEV_xxx 更是配对记录本身就常在 —— 拿它们判在线会永远显示"已连接"。
+            $hidIndex = (@(Get-PnpDevice -Class HIDClass -PresentOnly -ErrorAction SilentlyContinue |
+                           Where-Object { $_.InstanceId -like 'HID\*' } |
+                           ForEach-Object { $_.InstanceId }) -join '|').ToUpperInvariant()
             $list = New-Object System.Collections.ArrayList
             foreach ($n in $nodes) {
                 $dev = $null
@@ -240,11 +244,7 @@ $script:ProbeBlock = {
                     if ($dev.Name -notmatch $cfg.NameFilter) { continue }
                 }
                 if ($dev.Mac) {
-                    $hit = @($all | Where-Object {
-                        $_.PNPDeviceID -and $_.PNPDeviceID.Contains($dev.Mac) -and
-                        ($_.PNPDeviceID.StartsWith('HID\') -or $_.PNPDeviceID.StartsWith('BTHLEDEVICE\'))
-                    })
-                    $dev.Online = ($hit.Count -gt 0)
+                    $dev.Online = $hidIndex.Contains($dev.Mac.ToUpperInvariant())
                 }
                 [void]$list.Add($dev)
             }
@@ -255,9 +255,11 @@ $script:ProbeBlock = {
             $dev = $null
             try { $dev = Read-Node $cfg.Id $cfg.DevKey $cfg.Name } catch { }
             if ($dev -and $dev.Mac) {
-                $hit = @(Get-CimInstance -ClassName Win32_PnPEntity `
-                         -Filter "PNPDeviceID LIKE '%$($dev.Mac)%'" -ErrorAction SilentlyContinue |
-                         Where-Object { $_.PNPDeviceID -like 'HID\*' -or $_.PNPDeviceID -like 'BTHLEDEVICE\*' })
+                $hit = @(Get-PnpDevice -Class HIDClass -PresentOnly -ErrorAction SilentlyContinue |
+                         Where-Object {
+                             $_.InstanceId -like 'HID\*' -and
+                             $_.InstanceId.IndexOf($dev.Mac, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+                         })
                 $dev.Online = ($hit.Count -gt 0)
             }
             $out.Devices = @($dev)
@@ -284,6 +286,8 @@ $script:WorkerStart = [datetime]::MinValue
 $script:WorkerScan = $false
 $script:NeedScan = $false
 $script:ForceRescan = $false
+$script:PendingRefresh = $false        # 刷新时正好有探测在跑 → 排队，别丢掉这次点击
+$script:VerifyAt = $null               # 手动刷新后的二次确认时刻（PnP 移除有延迟）
 $script:PickerPending = $false
 $script:FailCount = 0
 $script:LastPainted = ''
@@ -378,7 +382,13 @@ function Apply-ProbeResult {
     }
 
     $dev = $null
-    if ($res.Devices -and @($res.Devices).Count -gt 0) { $dev = @($res.Devices)[0] }
+    if ($res.Devices -and @($res.Devices).Count -gt 0) {
+        # 扫描结果是排序过的，优先取配置里那台，别因为排序换成了别的设备
+        if ($script:Cfg.DeviceId) {
+            $dev = @($res.Devices) | Where-Object { $_.Id -eq $script:Cfg.DeviceId } | Select-Object -First 1
+        }
+        if (-not $dev) { $dev = @($res.Devices)[0] }
+    }
 
     if ($dev) {
         $script:FailCount = 0
@@ -792,7 +802,9 @@ $miRefresh.Add_Click({
     if ($script:Cfg.DeviceId) { $script:ForceRescan = $true }
     else { $script:NeedScan = $true }
     $script:State.LastSeen = $null
-    Start-Probe
+    # 断电/断连后系统移除 PnP 节点有几秒延迟，先立刻探一次，4 秒后再确认一次
+    $script:VerifyAt = (Get-Date).AddSeconds(4)
+    if ($script:Worker) { $script:PendingRefresh = $true } else { Start-Probe }
 })
 $miAuto.Add_Click({ Set-Autostart -Enable ([bool]$miAuto.Checked) })
 $miLog.Add_Click({ if (Test-Path -LiteralPath $script:LogPath) { Start-Process notepad.exe $script:LogPath } })
@@ -804,6 +816,8 @@ $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 1000
 $timer.Add_Tick({
     if ($script:Worker) { Complete-Probe }
+    elseif ($script:PendingRefresh) { $script:PendingRefresh = $false; Start-Probe }
+    elseif ($script:VerifyAt -and (Get-Date) -ge $script:VerifyAt) { $script:VerifyAt = $null; Start-Probe }
     elseif (((Get-Date) - $script:WorkerStart).TotalMilliseconds -ge ($script:Cfg.RefreshSeconds * 1000)) {
         Start-Probe
     }
