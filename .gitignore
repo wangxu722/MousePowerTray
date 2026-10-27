@@ -1,0 +1,29 @@
+# 依赖与构建产物
+node_modules/
+package.json
+package-lock.json
+
+# 视频逐帧中间产物
+docs/video/frames/
+docs/video/out/
+*.webm
+
+# 排版校对用的临时截图
+docs/_*.png
+docs/video/_*.png
+docs/video/peek-*.png
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 参考项目只留在本地，不进公开仓库
+reference/
+# 分发包保留 zip，解压目录不入库
+dist/MousePowerTray/
+
+# 本地笔记与校对脚本
+.workbuddy/
+docs/_*.js
+preview/icon-[0-9]*.png

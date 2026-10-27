@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MousePowerTray · 把蓝牙鼠标电量钉在任务栏上</title>
+<meta name="description" content="一个 12.7 KB 的单文件工具，把蓝牙鼠标电量显示在 Windows 任务栏。只读、零依赖、免编译。">
+<style>
+  :root{
+    --bg:#070907; --panel:#0B0E0B; --line:#1B241B; --line2:#131A13;
+    --ink:#C9F3DF; --dim:#5B7A6A; --accent:#19FAC6; --warn:#FFC036; --danger:#F0503C;
+    --mono:"Cascadia Mono","JetBrains Mono",Consolas,"Microsoft YaHei UI",monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--ink);font-family:var(--mono);-webkit-font-smoothing:antialiased;line-height:1.7}
+  a{color:inherit;text-decoration:none}
+  .wrap{max-width:1060px;margin:0 auto;padding:0 28px}
+  .muted{color:var(--dim)}
+  .hl{color:var(--accent)}
+
+  /* nav */
+  nav{position:sticky;top:0;z-index:20;background:rgba(7,9,7,.92);border-bottom:1px solid var(--line2);backdrop-filter:blur(6px)}
+  nav .wrap{display:flex;align-items:center;justify-content:space-between;height:58px}
+  nav .brand{font-size:13px;letter-spacing:.2em}
+  nav .brand b{color:var(--accent);font-weight:400}
+  nav .links{display:flex;gap:26px;font-size:13px;color:var(--dim)}
+  nav .links a:hover{color:var(--accent)}
+
+  /* hero */
+  header.hero{padding:96px 0 84px;border-bottom:1px solid var(--line2)}
+  .hero-grid{display:grid;grid-template-columns:1.02fr .98fr;gap:64px;align-items:center}
+  .kicker{font-size:12px;letter-spacing:.2em;color:var(--dim);margin-bottom:22px}
+  h1{font-size:64px;line-height:1.02;letter-spacing:-.035em;font-weight:400}
+  h1 .dim2{color:#7FA893}
+  .lede{margin-top:26px;font-size:15px;color:var(--dim);max-width:28em}
+  .lede strong{color:var(--ink);font-weight:400}
+  .cta{display:flex;gap:14px;margin-top:36px;flex-wrap:wrap}
+  .btn{border:1px solid var(--line);padding:11px 20px;font-size:14px;letter-spacing:.04em;transition:.15s}
+  .btn:hover{border-color:var(--accent);color:var(--accent)}
+  .btn.primary{border-color:var(--accent);color:#04120E;background:var(--accent)}
+  .btn.primary:hover{background:#3FFDD0;color:#04120E}
+  .hero-meta{margin-top:22px;font-size:12px;color:var(--dim);letter-spacing:.06em}
+
+  /* 终端卡片 */
+  .term{border:1px solid var(--line);background:var(--panel);padding:22px 24px;font-size:14px;line-height:2.05}
+  .term .dots{display:flex;gap:6px;margin-bottom:14px}
+  .term .dots i{width:8px;height:8px;border-radius:50%;background:var(--line);display:block}
+  .term .k{display:inline-block;width:70px;color:var(--dim)}
+  .term .bar{letter-spacing:.06em;color:var(--accent)}
+  .cur{display:inline-block;width:.55em;height:1em;background:var(--accent);vertical-align:-.12em;animation:blink 1.05s step-end infinite}
+  @keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
+
+  section{padding:84px 0;border-bottom:1px solid var(--line2)}
+  .sec-h{font-size:12px;letter-spacing:.2em;color:var(--dim);margin-bottom:14px}
+  .sec-t{font-size:34px;letter-spacing:-.02em;line-height:1.25;font-weight:400;max-width:26em}
+  .sec-d{margin-top:16px;font-size:14px;color:var(--dim);max-width:40em}
+
+  /* icons */
+  .icon-row{display:grid;grid-template-columns:auto 1fr;gap:48px;align-items:center;margin-top:44px}
+  .icon-card{border:1px solid var(--line);background:var(--panel);padding:18px}
+  .icon-card img{width:100%;max-width:520px;display:block}
+  .legend{display:flex;flex-direction:column;gap:16px;font-size:13.5px}
+  .legend .row{display:flex;align-items:baseline;gap:12px}
+  .sw{width:10px;height:10px;display:inline-block;flex:none}
+  .legend .row span{color:var(--dim)}
+
+  /* features */
+  .cols3{display:grid;grid-template-columns:repeat(3,1fr);gap:0;margin-top:48px;border-top:1px solid var(--line)}
+  .feat{padding:26px 26px 26px 0;border-right:1px solid var(--line2)}
+  .feat:last-child{border-right:0}
+  .feat .n{font-size:11px;color:var(--accent);letter-spacing:.14em}
+  .feat h3{margin-top:10px;font-size:17px;font-weight:400}
+  .feat p{margin-top:8px;font-size:13px;color:var(--dim)}
+
+  /* how */
+  .flow{display:flex;align-items:stretch;gap:0;margin-top:44px}
+  .node{border:1px solid var(--line);background:var(--panel);padding:16px 18px;flex:1}
+  .node .t{font-size:15px}
+  .node .d{font-size:11.5px;color:var(--dim);margin-top:5px;letter-spacing:.04em}
+  .lnk{flex:0 0 42px;display:flex;align-items:center;justify-content:center;color:var(--line)}
+
+  /* promo */
+  .promo-grid{display:grid;grid-template-columns:1fr 1fr;gap:26px;margin-top:44px}
+  .card{border:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column}
+  .card img{width:100%;display:block;border-bottom:1px solid var(--line)}
+  .card .body{padding:18px 20px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .card .t{font-size:15px}
+  .card .s{font-size:12px;color:var(--dim);margin-top:3px}
+  .dl{font-size:12px;color:var(--accent);border-bottom:1px solid rgba(25,250,198,.35);padding-bottom:1px;white-space:nowrap}
+  .video-box{margin-top:26px;border:1px solid var(--line);background:#000}
+  .video-box video{width:100%;display:block}
+
+  /* limits */
+  .limits{display:grid;grid-template-columns:1fr 1fr;gap:44px;margin-top:40px}
+  .limits ul{list-style:none;font-size:13.5px}
+  .limits li{padding:9px 0;border-bottom:1px solid var(--line2);display:flex;gap:10px;align-items:flex-start}
+  .limits li b{font-weight:400}
+  .yes{color:var(--accent)}
+  .no{color:var(--dim)}
+
+  footer{padding:52px 0 64px;font-size:12.5px;color:var(--dim)}
+  footer .wrap{display:flex;justify-content:space-between;gap:24px;flex-wrap:wrap}
+  footer a:hover{color:var(--accent)}
+
+  @media (max-width:900px){
+    h1{font-size:42px}
+    .hero-grid,.icon-row,.cols3,.promo-grid,.limits{grid-template-columns:1fr;gap:28px}
+    .feat{border-right:0;border-bottom:1px solid var(--line2);padding-right:0}
+    .flow{flex-direction:column}
+    .lnk{flex:0 0 22px}
+    header.hero{padding:56px 0}
+    section{padding:56px 0}
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <div class="brand"><b>MOUSE</b> POWER TRAY</div>
+    <div class="links">
+      <a href="#why">为什么</a>
+      <a href="#how">原理</a>
+      <a href="#promo">宣传物料</a>
+      <a href="https://github.com/wangxu722/MousePowerTray">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <div class="kicker">WINDOWS 10 / 11 · 单文件 · MIT</div>
+      <h1>你的鼠标<br><span class="dim2">还剩</span><span class="hl">多少电</span></h1>
+      <p class="lede">
+        无线鼠标从来不会提前告诉你它要没电。等你想起来看，它已经断线了。
+        <strong>MousePowerTray</strong> 把电量钉在任务栏上 —— 16×16，按电量填充，
+        永远在你能看见的地方。
+      </p>
+      <div class="cta">
+        <a class="btn primary" href="download/MousePowerTray.zip">下载 · 12.7 KB</a>
+        <a class="btn" href="#promo">看 24 秒宣传片</a>
+      </div>
+      <div class="hero-meta">零依赖 · 免编译 · 不需要管理员 · 不联网</div>
+    </div>
+
+    <div class="term">
+      <div class="dots"><i></i><i></i><i></i></div>
+      <div><span class="hl">$</span> <span id="typed"></span><span class="cur" id="cur"></span></div>
+      <div style="margin-top:12px">
+        <div><span class="k">device</span> AULA-SC580</div>
+        <div><span class="k">link</span> Bluetooth LE</div>
+        <div><span class="k">level</span> <span class="bar">████████░░░░░░░░░░░░</span> <span class="hl">42%</span></div>
+        <div><span class="k">state</span> <span class="hl">● connected</span></div>
+        <div><span class="k">updated</span> 14:01:58</div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section id="why">
+  <div class="wrap">
+    <div class="sec-h">01 / 一个图标够了</div>
+    <h2 class="sec-t">不弹窗、不占地方，<br>扫一眼就知道还能撑多久。</h2>
+    <p class="sec-d">图标是运行时用 GDI+ 现画的：鼠标轮廓 + 滚轮 + 按键缝，按电量从下往上填充。16×16 像素，认得出是鼠标，也看得出余量。</p>
+
+    <div class="icon-row">
+      <div class="icon-card"><img src="assets/icon-sheet.png" alt="不同电量下的托盘图标"></div>
+      <div class="legend">
+        <div class="row"><i class="sw" style="background:#19FAC6"></i><b>40% 以上</b><span>· 一切正常</span></div>
+        <div class="row"><i class="sw" style="background:#FFC036"></i><b>16% – 40%</b><span>· 该留意了</span></div>
+        <div class="row"><i class="sw" style="background:#F0503C"></i><b>15% 及以下</b><span>· 弹一次气泡提醒</span></div>
+        <div class="row"><i class="sw" style="background:#9AA3AD"></i><b>断开 / 无设备</b><span>· 整只灰显，仍保留最后读数</span></div>
+      </div>
+    </div>
+
+    <div class="cols3">
+      <div class="feat">
+        <div class="n">01 / READ ONLY</div>
+        <h3>只读，什么都不改</h3>
+        <p>不装驱动、不碰 DPI 和灯效、不监听键鼠输入。只读设备属性，外加一个可随时取消的开机启动项。</p>
+      </div>
+      <div class="feat">
+        <div class="n">02 / 认标准不认品牌</div>
+        <h3>换鼠标不用改代码</h3>
+        <p>读的是 Windows 已经从标准 BLE 电池服务采好的数据。罗技、微软、小米、AULA……只要实现了标准电池服务就行。</p>
+      </div>
+      <div class="feat">
+        <div class="n">03 / 后台线程</div>
+        <h3>界面永远不卡</h3>
+        <p>单次设备查询要 1–2 秒，全部丢到后台 Runspace。主线程只做 1 秒一跳的调度，托盘菜单点了就开。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <div class="sec-h">02 / 原理</div>
+    <h2 class="sec-t">不逆向协议，只读系统已经采好的数</h2>
+    <p class="sec-d">很多厂商把电量藏在自己的软件窗口里，关掉软件就看不见 —— 那意味着每家都要抓包逆向一遍。MousePowerTray 走的是标准链路。</p>
+
+    <div class="flow">
+      <div class="node"><div class="t">鼠标</div><div class="d">蓝牙 LE</div></div>
+      <div class="lnk">▶</div>
+      <div class="node"><div class="t">GATT 0x180F</div><div class="d">标准电池服务</div></div>
+      <div class="lnk">▶</div>
+      <div class="node"><div class="t">0x2A19</div><div class="d">电量 uint8</div></div>
+      <div class="lnk">▶</div>
+      <div class="node"><div class="t">系统属性缓存</div><div class="d">DEVPKEY_Bluetooth_Battery</div></div>
+      <div class="lnk">▶</div>
+      <div class="node"><div class="t">托盘图标</div><div class="d">GDI+ 现画</div></div>
+    </div>
+  </div>
+</section>
+
+<section id="promo">
+  <div class="wrap">
+    <div class="sec-h">03 / 宣传物料</div>
+    <h2 class="sec-t">两种排法，一样的信息</h2>
+    <p class="sec-d">同一份内容做了两个版本：纯黑终端的《诊断卡》，和米白纸感的《点阵打印版》。都是 16:9 三页，可直接投影或打印。</p>
+
+    <div class="promo-grid">
+      <div class="card">
+        <img src="assets/thumb-dark.png" alt="终端版宣传册封面">
+        <div class="body">
+          <div>
+            <div class="t">终端诊断卡</div>
+            <div class="s">PDF · 3 页 · 深色</div>
+          </div>
+          <a class="dl" href="pdf/MousePowerTray-terminal-dark.pdf">打开 PDF</a>
+        </div>
+      </div>
+      <div class="card">
+        <img src="assets/thumb-paper.png" alt="点阵打印版宣传册封面">
+        <div class="body">
+          <div>
+            <div class="t">点阵打印版</div>
+            <div class="s">PDF · 3 页 · 浅色</div>
+          </div>
+          <a class="dl" href="pdf/MousePowerTray-paper-terminal.pdf">打开 PDF</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="video-box">
+      <video src="video/MousePowerTray-promo.mp4" poster="assets/poster.jpg" controls playsinline preload="none"></video>
+    </div>
+    <p class="sec-d" style="margin-top:14px">24 秒 · 1280×720 · 60fps · 无声。逐帧捕获后编码，不是屏幕录像，所以没有掉帧和抖动。</p>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrap">
+    <div class="sec-h">04 / 边界</div>
+    <h2 class="sec-t">说清楚它做不到什么</h2>
+    <p class="sec-d">一个诚实的工具应该先划边界。下面这些不是"待实现"，是物理上做不到。</p>
+
+    <div class="limits">
+      <div>
+        <ul>
+          <li><span class="yes">✓</span><b>标准 BLE 电池服务的输入设备</b></li>
+          <li><span class="yes">✓</span><b>鼠标 / 键盘 / 部分手柄</b><span class="muted">，多台可切换</span></li>
+          <li><span class="yes">✓</span><b>断开重连</b><span class="muted">，自动识别</span></li>
+        </ul>
+      </div>
+      <div>
+        <ul>
+          <li><span class="no">✗</span><b>2.4G 接收器</b><span class="muted">，厂商私有协议，一家一套</span></li>
+          <li><span class="no">✗</span><b>纯经典蓝牙耳机</b><span class="muted">，电量不落进系统</span></li>
+          <li><span class="no">✗</span><b>手环</b><span class="muted">，私有服务 + 需要 auth key</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div>
+      MIT License · 思路参考 <a href="https://github.com/Tan-TanZi/InphicBatteryTray">Tan-TanZi/InphicBatteryTray</a>
+    </div>
+    <div><a href="https://github.com/wangxu722/MousePowerTray">github.com/wangxu722/MousePowerTray</a></div>
+  </div>
+</footer>
+
+<script>
+  /* 终端打字机：只跑一次，可降级 */
+  (function () {
+    var el = document.getElementById('typed');
+    var cmd = 'tray --battery';
+    var i = 0;
+    setTimeout(function tick() {
+      el.textContent = cmd.slice(0, ++i);
+      if (i < cmd.length) setTimeout(tick, 55);
+      else document.getElementById('cur').style.animation = 'blink 1.05s step-end infinite';
+    }, 500);
+  })();
+</script>
+</body>
+</html>

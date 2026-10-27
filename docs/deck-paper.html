@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>MousePowerTray · 宣传册（点阵打印版）</title>
+<link rel="stylesheet" href="assets/term.css">
+<style>
+  .paper { position: relative; }
+  /* 点阵打印的横向扫描纹，只落在面板里，不做装饰 */
+  .panel-dot {
+    border: 1px solid var(--line);
+    background:
+      repeating-linear-gradient(0deg, rgba(22, 38, 30, .045) 0 1px, transparent 1px 3px),
+      var(--panel);
+    position: relative;
+  }
+  .perf { border-top: 1px dashed var(--line); }
+
+  .tag-ro {
+    border: 1px solid var(--danger); color: var(--danger);
+    padding: 1px 6px; margin-left: 10px; letter-spacing: .12em; font-size: 10px;
+    display: inline-block; vertical-align: 1px;
+  }
+
+  .spec { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .spec td { padding: 7px 0; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  .spec td:first-child { color: var(--dim); width: 112px; letter-spacing: .04em; }
+  .spec td:last-child { text-align: right; }
+
+  .cmp { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .cmp th, .cmp td { padding: 9px 10px; border-bottom: 1px solid var(--line-soft); text-align: left; vertical-align: top; }
+  .cmp th { font-weight: 400; color: var(--dim); font-size: 11px; letter-spacing: .1em; border-bottom: 1px solid var(--line); }
+  .cmp td.y { color: var(--accent); }
+  .cmp td.n { color: var(--dim); }
+
+  .big-num { font-size: 40px; letter-spacing: -.02em; }
+  .big-num small { font-size: 13px; letter-spacing: 0; color: var(--dim); }
+
+  .flow-paper { font-size: 12.5px; line-height: 2.1; color: var(--dim); }
+  .flow-paper b { color: var(--ink); font-weight: 400; }
+  .flow-paper i { color: var(--accent); font-style: normal; }
+</style>
+</head>
+<body>
+<div class="deck v-paper">
+
+  <!-- ============ P1 ============ -->
+  <section class="page paper">
+    <div class="topbar">
+      <span>FORM 01 · MOUSE POWER TRAY · 蓝牙鼠标电量托盘<span class="tag-ro">READ ONLY</span></span>
+      <span>WINDOWS 10/11 · 单文件 · MIT</span>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1.15fr .85fr;gap:52px;flex:1;align-items:center;padding-top:6px">
+      <div>
+        <div class="tiny" style="letter-spacing:.22em;color:var(--dim);margin-bottom:14px">SYSTEM TRAY / BATTERY MONITOR</div>
+        <h1 class="title-xl" style="font-size:64px">鼠标电量<br>应该长在<br>任务栏上</h1>
+        <p class="small" style="margin-top:22px;max-width:24em;color:var(--dim)">
+          无线鼠标从来不会提前告诉你它要没电。<br>
+          MousePowerTray 只做一件事：<br>
+          把电量钉在你看得见的地方 —— 不弹窗、不打扰、<br>
+          不改任何设备设置。
+        </p>
+      </div>
+
+      <div class="panel-dot" style="padding:20px 22px">
+        <div class="tiny" style="color:var(--dim);letter-spacing:.12em;margin-bottom:12px">SPEC / 规格</div>
+        <table class="spec">
+          <tr><td>显示</td><td>16×16 托盘图标 · 按电量填充</td></tr>
+          <tr><td>读数</td><td><span class="hl bar">█████████░░░░░░░░░░░</span> 44%</td></tr>
+          <tr><td>来源</td><td>系统 BLE 电池服务缓存</td></tr>
+          <tr><td>刷新</td><td>10 秒 / 次（单次约 2 秒）</td></tr>
+          <tr><td>体积</td><td>12.7 KB · 零依赖 · 免编译</td></tr>
+          <tr><td>权限</td><td>不需要管理员</td></tr>
+          <tr><td>系统</td><td>Windows 10 / 11 · PowerShell 5.1</td></tr>
+          <tr><td>许可</td><td>MIT · 单文件 · 可自行改</td></tr>
+        </table>
+      </div>
+    </div>
+
+    <div class="foot">
+      <span>只读 · 不装驱动 · 不联网 · 无遥测</span>
+      <span>NO. 01 / 03</span>
+    </div>
+  </section>
+
+  <!-- ============ P2 ============ -->
+  <section class="page paper">
+    <div class="topbar">
+      <span>FORM 02 · 为什么系统里看不到</span>
+      <span>NO. 02 / 03</span>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1.25fr .75fr;gap:44px;flex:1;align-items:start">
+      <div>
+        <table class="cmp">
+          <tr><th style="width:34%">场景</th><th>系统设置</th><th>MousePowerTray</th></tr>
+          <tr><td>蓝牙 LE 鼠标</td><td class="n">有设备，无电量</td><td class="y">图标 + 百分比</td></tr>
+          <tr><td>2.4G 接收器鼠标</td><td class="n">无接口</td><td class="n">不支持（诚实标注）</td></tr>
+          <tr><td>断开 / 关机</td><td class="n">无感知</td><td class="y">整只灰显 + 最后值</td></tr>
+          <tr><td>低电量</td><td class="n">无提醒</td><td class="y">≤15% 弹一次气泡</td></tr>
+          <tr><td>多设备</td><td class="n">翻列表</td><td class="y">菜单里切换</td></tr>
+        </table>
+        <div class="perf" style="margin-top:26px;padding-top:16px;font-size:12px;color:var(--dim);line-height:1.95">
+          <span class="prompt" style="color:var(--accent)">$</span> battery --query &nbsp;<span class="bad" style="color:var(--danger)">not found.</span><br>
+          很多厂商把电量藏在自己的软件窗口里。关掉软件，你就只能等它没电。
+        </div>
+      </div>
+
+      <div>
+        <div class="big-num">12.7<small> KB</small></div>
+        <div class="tiny" style="color:var(--dim);margin-top:2px">整个分发包，含使用说明</div>
+        <div class="rule" style="margin:20px 0"></div>
+        <div class="big-num">0<small> 依赖</small></div>
+        <div class="tiny" style="color:var(--dim);margin-top:2px">不用装 .NET SDK，不用管理员</div>
+        <div class="rule" style="margin:20px 0"></div>
+        <div class="big-num">10<small> 秒</small></div>
+        <div class="tiny" style="color:var(--dim);margin-top:2px">后台轮询，界面永远不卡</div>
+      </div>
+    </div>
+
+    <div class="perf" style="display:grid;grid-template-columns:repeat(3,1fr);gap:26px;padding-top:16px;margin-top:10px">
+      <div>
+        <div class="tiny" style="color:var(--accent);letter-spacing:.12em">CONSTRAINT 01</div>
+        <div class="small" style="margin-top:4px">只读。不改 DPI、灯效、按键映射。</div>
+      </div>
+      <div>
+        <div class="tiny" style="color:var(--accent);letter-spacing:.12em">CONSTRAINT 02</div>
+        <div class="small" style="margin-top:4px">不联网。没有遥测，没有更新检查。</div>
+      </div>
+      <div>
+        <div class="tiny" style="color:var(--accent);letter-spacing:.12em">CONSTRAINT 03</div>
+        <div class="small" style="margin-top:4px">不读你。只碰设备属性，不碰键鼠输入。</div>
+      </div>
+    </div>
+
+    <div class="foot">
+      <span>数据全部来自本机，不联网</span>
+      <span>NO. 02 / 03</span>
+    </div>
+  </section>
+
+  <!-- ============ P3 ============ -->
+  <section class="page paper">
+    <div class="topbar">
+      <span>FORM 03 · 原理与上手</span>
+      <span>NO. 03 / 03</span>
+    </div>
+
+    <div class="panel-dot" style="padding:18px 20px;margin-bottom:24px">
+      <div class="tiny" style="color:var(--dim);letter-spacing:.12em;margin-bottom:10px">DATA PATH</div>
+      <div class="flow-paper">
+        鼠标 ──BLE──▶ <i>GATT 0x180F</i> ──▶ <i>0x2A19</i> ──▶ Windows 缓存 ──▶ <b>DEVPKEY_Bluetooth_Battery</b> ──▶ <b>托盘</b><br>
+        <span style="padding-left:0">　　　　　　　标准电池服务　　　电量 uint8　　　系统自己采　　　只读读取，不抓包　　　GDI+ 现画</span>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:44px;flex:1;align-items:start">
+      <div>
+        <div class="title-md" style="margin-bottom:10px">支持 / 不支持</div>
+        <table class="cmp" style="font-size:12px">
+          <tr><td class="y" style="width:22px">✓</td><td>任何实现标准 BLE 电池服务的输入设备</td></tr>
+          <tr><td class="y">✓</td><td>鼠标 / 键盘 / 部分手柄，多台可切换</td></tr>
+          <tr><td class="n">✗</td><td>2.4G 接收器（厂商私有协议，一家一套）</td></tr>
+          <tr><td class="n">✗</td><td>纯经典蓝牙耳机、手环（电量不进系统）</td></tr>
+        </table>
+      </div>
+      <div>
+        <div class="title-md" style="margin-bottom:10px">三步上手</div>
+        <table class="cmp" style="font-size:12px">
+          <tr><td style="width:26px;color:var(--accent)">01</td><td>解压整个文件夹，放哪都行</td></tr>
+          <tr><td style="color:var(--accent)">02</td><td>双击 MousePowerTray.vbs（不闪黑窗）</td></tr>
+          <tr><td style="color:var(--accent)">03</td><td>右键勾「开机自动启动」</td></tr>
+        </table>
+        <div class="tiny" style="color:var(--dim);margin-top:16px;line-height:1.9">
+          配置与日志：%LOCALAPPDATA%\MousePowerTray<br>
+          卸载：取消勾选 → 退出 → 删文件夹
+        </div>
+      </div>
+    </div>
+
+    <div class="foot">
+      <span>PowerShell 5.1 · 免编译 · 单文件</span>
+      <span>NO. 03 / 03</span>
+    </div>
+  </section>
+
+</div>
+<script>if(new URLSearchParams(location.search).has("bare"))document.body.classList.add("bare");</script><!--bare-mode-->
+</body>
+</html>

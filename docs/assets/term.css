@@ -1,0 +1,143 @@
+/* MousePowerTray · 终端极客设计系统
+   两个变体：.v-dark（纯黑荧光绿）/ .v-paper（米白点阵打印） */
+
+:root {
+  --mono: "Cascadia Mono", "JetBrains Mono", Consolas, "Microsoft YaHei UI", monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: var(--mono);
+  -webkit-font-smoothing: antialiased;
+  background: #111;
+}
+
+/* ---------- 变体 A：纯黑终端 ---------- */
+.v-dark {
+  --bg: #070907;
+  --panel: #0B0E0B;
+  --line: #1B241B;
+  --line-soft: #12180F;
+  --ink: #C9F3DF;
+  --dim: #5B7A6A;
+  --accent: #19FAC6;
+  --warn: #FFC036;
+  --danger: #F03C3C;
+  background: var(--bg);
+  color: var(--ink);
+}
+
+/* ---------- 变体 B：米白点阵打印 ---------- */
+.v-paper {
+  --bg: #F2EFE4;
+  --panel: #FAF8F0;
+  --line: #C9C2AC;
+  --line-soft: #E2DCC8;
+  --ink: #16261E;
+  --dim: #6E7C6C;
+  --accent: #0F6E56;
+  --warn: #A96B00;
+  --danger: #A32D2D;
+  background: var(--bg);
+  color: var(--ink);
+}
+
+.page {
+  width: 1120px;
+  height: 630px;
+  position: relative;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--ink);
+  padding: 46px 56px 72px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 屏幕预览时把页面居中排布 */
+@media screen {
+  .deck { display: flex; flex-direction: column; align-items: center; gap: 28px; padding: 40px 0 80px; }
+  .page { box-shadow: 0 24px 60px rgba(0, 0, 0, .45); }
+  /* ?bare —— 只取第一页，用于生成缩略图/封面 */
+  body.bare { background: #070907; overflow: hidden; }
+  body.bare .deck { padding: 0; gap: 0; }
+  body.bare .page { box-shadow: none; }
+  body.bare .page:not(:first-child) { display: none; }
+}
+
+/* ---------- 打印 ---------- */
+@page { size: 1120px 630px; margin: 0; }
+@media print {
+  body { background: #fff; }
+  .deck { display: block; padding: 0; gap: 0; }
+  .page { box-shadow: none; page-break-after: always; break-after: page; }
+  .page:last-child { page-break-after: auto; break-after: auto; }
+  .no-print { display: none !important; }
+}
+
+/* ---------- 通用元件 ---------- */
+.topbar {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 12px; color: var(--dim); letter-spacing: .06em;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 10px; margin-bottom: 26px;
+}
+.topbar b { color: var(--accent); font-weight: 400; }
+
+.prompt { color: var(--accent); }
+.muted { color: var(--dim); }
+.hl { color: var(--accent); }
+.warn { color: var(--warn); }
+.bad { color: var(--danger); }
+
+.title-xl {
+  font-size: 74px; line-height: .96; letter-spacing: -.03em;
+  font-weight: 400;
+}
+.title-lg { font-size: 44px; line-height: 1.1; letter-spacing: -.02em; }
+.title-md { font-size: 26px; line-height: 1.25; }
+.small { font-size: 13px; line-height: 1.75; }
+.tiny { font-size: 11px; line-height: 1.6; letter-spacing: .04em; }
+
+.rule { height: 1px; background: var(--line); }
+.rule-soft { height: 1px; background: var(--line-soft); }
+
+/* ASCII 电量条 */
+.bar { letter-spacing: .08em; white-space: nowrap; }
+
+/* 终端窗口 */
+.win {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  padding: 18px 22px;
+  font-size: 14px;
+  line-height: 1.9;
+}
+.win .dots { display: flex; gap: 6px; margin-bottom: 12px; }
+.win .dots i { width: 8px; height: 8px; border-radius: 50%; background: var(--line); display: block; }
+
+/* 底部元信息 */
+.foot {
+  position: absolute; left: 56px; right: 56px; bottom: 24px;
+  display: flex; justify-content: space-between;
+  font-size: 11px; color: var(--dim); letter-spacing: .05em;
+  border-top: 1px solid var(--line); padding-top: 8px;
+}
+
+/* 光标 */
+.cursor {
+  display: inline-block; width: .46em; height: .92em;
+  background: var(--accent); vertical-align: -.16em;
+  animation: blink 1.05s step-end infinite;
+}
+@keyframes blink { 0%, 49% { opacity: 1 } 50%, 100% { opacity: 0 } }
+
+/* 网格辅助：极细点阵，只做质感不做装饰 */
+.grid-bg {
+  position: absolute; inset: 0; pointer-events: none;
+  background-image: radial-gradient(currentColor 1px, transparent 1px);
+  background-size: 8px 8px;
+  color: var(--line);
+  opacity: .5;
+}

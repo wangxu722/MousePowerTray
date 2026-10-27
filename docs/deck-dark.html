@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>MousePowerTray · 宣传册（终端版）</title>
+<link rel="stylesheet" href="assets/term.css">
+<style>
+  .cover-grid { display: grid; grid-template-columns: 1.05fr 1fr; gap: 44px; flex: 1; align-items: center; }
+  .cover-kicker { font-size: 12px; color: var(--dim); letter-spacing: .18em; margin-bottom: 18px; }
+  .cover-sub { font-size: 15px; line-height: 1.9; color: var(--dim); margin-top: 26px; max-width: 30em; }
+  .cover-sub em { color: var(--ink); font-style: normal; }
+
+  .cols2 { display: grid; grid-template-columns: 1fr 34px 1fr; gap: 18px; align-items: stretch; flex: 1; min-height: 0; }
+  .arrow { display: flex; align-items: center; justify-content: center; color: var(--accent); font-size: 20px; }
+
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; border-top: 1px solid var(--line); margin-top: 16px; }
+  .stat { padding: 12px 18px 0 0; border-right: 1px solid var(--line-soft); }
+  .stat:last-child { border-right: 0; }
+  .stat .k { font-size: 11px; color: var(--dim); letter-spacing: .08em; }
+  .stat .v { font-size: 26px; color: var(--accent); margin-top: 3px; letter-spacing: -.02em; }
+  .stat .v small { font-size: 13px; color: var(--dim); letter-spacing: 0; }
+
+  .flow { border: 1px solid var(--line); padding: 16px 18px; margin: 6px 0 18px; }
+  .flow pre { font-size: 12.5px; line-height: 2.05; color: var(--dim); }
+  .flow pre b { color: var(--ink); font-weight: 400; }
+  .flow pre i { color: var(--accent); font-style: normal; }
+
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .step { border-left: 1px solid var(--accent); padding-left: 12px; }
+  .step .n { font-size: 11px; color: var(--accent); letter-spacing: .14em; }
+  .step .t { font-size: 14px; margin-top: 6px; }
+  .step .d { font-size: 11.5px; color: var(--dim); margin-top: 4px; line-height: 1.7; }
+</style>
+</head>
+<body>
+<div class="deck v-dark">
+
+  <!-- ============ P1 封面 ============ -->
+  <section class="page">
+    <div class="grid-bg"></div>
+    <div class="topbar">
+      <span><b>MOUSE POWER TRAY</b> — 蓝牙鼠标电量托盘</span>
+      <span>WINDOWS 10 / 11 · v1.0 · MIT</span>
+    </div>
+
+    <div class="cover-grid">
+      <div>
+        <div class="cover-kicker">// SYSTEM TRAY UTILITY</div>
+        <h1 class="title-xl">你的鼠标<br>还剩<span class="hl">多少电</span><span class="cursor"></span></h1>
+        <p class="cover-sub">
+          电量掉到 5% 的那一刻，你才知道无线鼠标会断线。<br>
+          <em>MousePowerTray</em> 把电量钉在任务栏上，格式 16×16，
+          永远在你能看见的地方。
+        </p>
+      </div>
+
+      <div class="win">
+        <div class="dots"><i></i><i></i><i></i></div>
+        <div><span class="prompt">$</span> tray --battery</div>
+        <div style="margin-top:10px">
+          <span class="muted">device</span>  AULA-SC580<br>
+          <span class="muted">link</span>    Bluetooth LE<br>
+          <span class="muted">level</span>   <span class="hl bar">█████████░░░░░░░░░░░</span> <span class="hl">44%</span><br>
+          <span class="muted">updated</span> 10:49:14<br>
+          <span class="muted">state</span>   <span class="hl">● connected</span>
+        </div>
+        <div style="margin-top:14px;color:var(--dim)">
+          <span class="prompt">$</span> _
+        </div>
+      </div>
+    </div>
+
+    <div class="foot">
+      <span>只读 · 不装驱动 · 不联网</span>
+      <span>github.com/wangxu722/MousePowerTray</span>
+    </div>
+  </section>
+
+  <!-- ============ P2 痛点 → 解决 ============ -->
+  <section class="page">
+    <div class="topbar">
+      <span><b>01 / THE GAP</b></span>
+      <span>系统告诉你「已连接」，却不告诉你「还能撑多久」</span>
+    </div>
+
+    <div class="cols2" style="flex:none;height:340px">
+      <div class="win" style="border-color:var(--line)">
+        <div class="dots"><i></i><i></i><i></i></div>
+        <div class="muted" style="margin-bottom:10px">BEFORE —— 系统设置 · 蓝牙和设备</div>
+        <div>AULA-SC580&nbsp;&nbsp;<span class="muted">已连接</span></div>
+        <div class="muted" style="margin-top:16px">
+          <span class="prompt">$</span> battery --query<br>
+          <span class="bad">not found.</span><br>
+          <span class="muted">→ 2.4G / 经典蓝牙没有统一电量接口</span>
+        </div>
+        <div style="margin-top:18px;color:var(--dim);font-size:12px;line-height:1.9">
+          厂商软件只在它自己的窗口里显示电量<br>
+          关掉软件，你就什么都不知道
+        </div>
+      </div>
+
+      <div class="arrow">▶</div>
+
+      <div class="win" style="border-color:var(--accent)">
+        <div class="dots"><i></i><i></i><i></i></div>
+        <div class="muted" style="margin-bottom:10px">AFTER —— 任务栏，一直在这儿</div>
+        <div style="font-size:22px">
+          <span class="hl bar">▮▮▮▮▮▮▮▮▮</span> <span class="hl">44%</span>
+        </div>
+        <div class="muted" style="margin-top:10px">悬停即读，右键看详情</div>
+        <div style="margin-top:18px;color:var(--dim);font-size:12px;line-height:1.9">
+          青绿 &gt;40% ／ 黄 16–40% ／ 红 ≤15%<br>
+          低于 15% 弹一次气泡提醒<br>
+          设备断开 → 整只灰显，不漏报也不误报
+        </div>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat">
+        <div class="k">分发包</div>
+        <div class="v">12.7 <small>KB</small></div>
+      </div>
+      <div class="stat">
+        <div class="k">运行时依赖</div>
+        <div class="v">0 <small>个</small></div>
+      </div>
+      <div class="stat">
+        <div class="k">轮询间隔</div>
+        <div class="v">10 <small>秒</small></div>
+      </div>
+    </div>
+
+    <div class="foot">
+      <span>不需要管理员权限 · 不写系统目录</span>
+      <span>config + log 都在 %LOCALAPPDATA%\MousePowerTray</span>
+    </div>
+  </section>
+
+  <!-- ============ P3 原理 + 上手 ============ -->
+  <section class="page">
+    <div class="topbar">
+      <span><b>02 / HOW IT WORKS</b></span>
+      <span>不逆向协议，只读系统已经采好的数</span>
+    </div>
+
+    <div style="flex:1;display:flex;flex-direction:column;justify-content:center">
+    <div class="flow">
+      <pre>  <b>鼠标</b> ──BLE──▶ <i>GATT 0x180F</i> ──▶ <i>0x2A19</i> ──▶ Windows 缓存 ──▶ <b>DEVPKEY_Bluetooth_Battery</b> ──▶ <b>托盘图标</b>
+                         标准电池服务      电量 uint8         系统自己采           只读，无需抓包              GDI+ 现画</pre>
+    </div>
+
+    <div class="cols2" style="grid-template-columns:1.15fr 1fr;flex:none">
+      <div>
+        <div class="title-md" style="margin-bottom:12px">它支持哪些设备</div>
+        <div class="small">
+          <span class="hl">✓</span> 任何实现标准 BLE 电池服务的输入设备 —— 换品牌不用改代码<br>
+          <span class="hl">✓</span> 鼠标、键盘、部分手柄，一台电脑多台设备可切换<br>
+          <span class="muted">✗</span> 2.4G 接收器（厂商私有协议，一家一套）<br>
+          <span class="muted">✗</span> 纯经典蓝牙耳机、手环（电量不落到系统里）
+        </div>
+      </div>
+      <div>
+        <div class="title-md" style="margin-bottom:12px">三步上手</div>
+        <div class="steps">
+          <div class="step"><div class="n">01</div><div class="t">解压</div><div class="d">整个文件夹，放哪都行</div></div>
+          <div class="step"><div class="n">02</div><div class="t">双击 .vbs</div><div class="d">静默启动，不闪黑窗</div></div>
+          <div class="step"><div class="n">03</div><div class="t">右键勾自启</div><div class="d">wscript 拉起，开机即用</div></div>
+        </div>
+      </div>
+    </div>
+    </div>
+
+    <div class="foot">
+      <span>PowerShell 5.1 · 免编译 · 单文件</span>
+      <span>MIT License</span>
+    </div>
+  </section>
+
+</div>
+<script>if(new URLSearchParams(location.search).has("bare"))document.body.classList.add("bare");</script><!--bare-mode-->
+</body>
+</html>

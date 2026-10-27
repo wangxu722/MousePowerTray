@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>MousePowerTray · 24s 宣传片</title>
+<style>
+  :root {
+    --bg: #070907; --ink: #C9F3DF; --dim: #5B7A6A; --accent: #19FAC6;
+    --line: #1B241B; --panel: #0B0E0B; --mono: "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: #000; height: 100%; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; font-family: var(--mono); }
+
+  #stage {
+    position: relative; width: 1280px; height: 720px;
+    background: var(--bg); color: var(--ink); overflow: hidden;
+    transform-origin: center center;
+  }
+  #grid {
+    position: absolute; inset: 0; opacity: .5;
+    background-image: radial-gradient(#1B241B 1px, transparent 1px);
+    background-size: 8px 8px;
+  }
+  .scene { position: absolute; inset: 0; padding: 96px; }
+  .pad { position: absolute; left: 96px; right: 96px; }
+
+  .prompt { color: var(--accent); }
+  .dim { color: var(--dim); }
+  .cur {
+    display: inline-block; width: .5em; height: 1em; background: var(--accent);
+    vertical-align: -.14em; opacity: 0;
+  }
+  #s1 { display: flex; align-items: center; }
+  #s1 .line { font-size: 40px; letter-spacing: .01em; }
+
+  /* S2 */
+  #s2 { display: flex; align-items: center; justify-content: space-between; gap: 60px; }
+  #s2 .panel {
+    width: 500px; border: 1px solid var(--line); background: var(--panel);
+    padding: 26px 30px; font-size: 20px; line-height: 2.1;
+  }
+  #s2 .row { display: flex; justify-content: space-between; }
+  #s2 .bar { letter-spacing: .1em; color: #3C4E42; }
+  #s2 .verdict { font-size: 62px; line-height: 1.06; letter-spacing: -.02em; }
+  #s2 .verdict em { color: var(--accent); font-style: normal; }
+
+  /* S3 */
+  #s3 { display: flex; align-items: center; gap: 70px; }
+  #s3 .left { display: flex; flex-direction: column; align-items: center; gap: 24px; }
+  #s3 canvas { display: block; }
+  #s3 .cap { font-size: 15px; color: var(--dim); letter-spacing: .1em; }
+  #s3 .num { font-size: 150px; line-height: 1; color: var(--accent); letter-spacing: -.04em; }
+  #s3 .num small { font-size: 56px; }
+  #s3 .note { font-size: 21px; color: var(--dim); margin-top: 18px; line-height: 1.7; }
+
+  /* S4 */
+  #s4 { display: flex; flex-direction: column; justify-content: center; }
+  #s4 .h { font-size: 26px; color: var(--ink); margin-bottom: 46px; letter-spacing: .02em; }
+  #s4 .flow { display: flex; align-items: center; gap: 0; }
+  #s4 .node {
+    border: 1px solid var(--line); background: var(--panel);
+    padding: 16px 18px; min-width: 168px;
+  }
+  #s4 .node .t { font-size: 19px; color: var(--ink); }
+  #s4 .node .d { font-size: 13px; color: var(--dim); margin-top: 6px; letter-spacing: .04em; }
+  #s4 .node.on { border-color: var(--accent); }
+  #s4 .node.on .t { color: var(--accent); }
+  #s4 .link { height: 1px; background: var(--line); flex: 1; position: relative; transform-origin: left center; }
+  #s4 .arrow { color: var(--dim); font-size: 13px; padding: 0 8px; }
+
+  /* S5 */
+  #s5 { display: flex; flex-direction: column; justify-content: center; align-items: flex-start; }
+  #s5 .brand { font-size: 96px; letter-spacing: -.045em; line-height: 1; }
+  #s5 .brand span { display: inline-block; }
+  #s5 .sub { font-size: 24px; color: var(--dim); margin-top: 26px; letter-spacing: .04em; }
+  #s5 .facts { display: flex; gap: 54px; margin-top: 46px; font-size: 17px; color: var(--ink); }
+  #s5 .facts b { color: var(--accent); font-weight: 400; }
+  #s5 .url { position: absolute; left: 96px; bottom: 74px; font-size: 15px; color: var(--dim); letter-spacing: .06em; }
+
+  /* 顶部标签 + 底部进度 */
+  #hud {
+    position: absolute; left: 96px; top: 46px; font-size: 12px;
+    color: var(--dim); letter-spacing: .18em; opacity: 0;
+  }
+  #hud b { color: var(--accent); font-weight: 400; }
+  #progwrap { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: #10160F; }
+  #prog { height: 100%; width: 0; background: var(--accent); }
+  body.rec #progwrap { display: none; }
+
+  /* 控件（录制时隐藏） */
+  #ui {
+    position: absolute; left: 0; right: 0; bottom: 0; padding: 10px 14px;
+    display: flex; align-items: center; gap: 12px;
+    background: linear-gradient(transparent, rgba(0,0,0,.75));
+    font-size: 12px; color: var(--dim); opacity: 0; transition: opacity .2s;
+  }
+  #stage:hover #ui, body.rec #ui { opacity: 0; }
+  #stage:hover #ui { opacity: 1; }
+  body.rec #ui { display: none; }
+  #ui button {
+    font-family: var(--mono); font-size: 12px; color: var(--ink);
+    background: transparent; border: 1px solid var(--line); padding: 3px 9px; cursor: pointer;
+  }
+  #ui button:hover { border-color: var(--accent); color: var(--accent); }
+  #seek { flex: 1; accent-color: #19FAC6; height: 3px; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="grid"></div>
+
+  <div id="hud"><b>MPT</b> / PROMO 24s</div>
+
+  <!-- S1 -->
+  <section class="scene" id="s1">
+    <div class="line"><span class="prompt">$</span> <span id="typed"></span><span class="cur" id="cur1"></span></div>
+  </section>
+
+  <!-- S2 -->
+  <section class="scene" id="s2">
+    <div class="inner" style="display:flex;align-items:center;justify-content:center;gap:86px;width:100%">
+      <div class="panel">
+        <div class="row"><span>AULA-SC580</span><span class="dim">已连接</span></div>
+        <div class="row" style="margin-top:14px"><span class="dim">battery</span><span class="bar" id="bar2">░░░░░░░░░░░░░░░░</span></div>
+        <div class="dim" style="font-size:13px;margin-top:18px">系统只告诉你「已连接」</div>
+      </div>
+      <div class="verdict">已连接<br><em>≠</em> 还有电</div>
+    </div>
+  </section>
+
+  <!-- S3 -->
+  <section class="scene" id="s3">
+    <div class="inner" style="display:flex;align-items:center;justify-content:center;gap:80px;width:100%">
+      <div class="left">
+        <canvas id="icon" width="360" height="360"></canvas>
+        <div class="cap">16 × 16 · 托盘图标</div>
+      </div>
+      <div>
+        <div class="num"><span id="pct">0</span><small>%</small></div>
+        <div class="note" id="s3note">按电量从下往上填充<br>青绿 / 黄 / 红三档</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- S4 -->
+  <section class="scene" id="s4">
+    <div class="h" id="s4h">不逆向协议，只读系统已经采好的数</div>
+    <div class="flow">
+      <div class="node" id="n1"><div class="t">鼠标</div><div class="d">蓝牙 LE</div></div>
+      <div class="link" id="l1"></div><div class="arrow">▶</div>
+      <div class="node" id="n2"><div class="t">GATT 0x180F</div><div class="d">标准电池服务</div></div>
+      <div class="link" id="l2"></div><div class="arrow">▶</div>
+      <div class="node" id="n3"><div class="t">系统属性缓存</div><div class="d">Windows 已采集</div></div>
+      <div class="link" id="l3"></div><div class="arrow">▶</div>
+      <div class="node" id="n4"><div class="t">托盘图标</div><div class="d">GDI+ 现画</div></div>
+    </div>
+  </section>
+
+  <!-- S5 -->
+  <section class="scene" id="s5">
+    <div class="brand" id="brand"></div>
+    <div class="sub" id="s5sub">蓝牙鼠标电量托盘 · 打开就在那儿</div>
+    <div class="facts" id="s5facts">
+      <div><b>12.7 KB</b> 分发包</div>
+      <div><b>0</b> 依赖</div>
+      <div><b>双击</b> 即用</div>
+    </div>
+    <div class="url" id="s5url">github.com/wangxu722/MousePowerTray</div>
+  </section>
+
+  <div id="progwrap"><div id="prog"></div></div>
+
+  <div id="ui">
+    <button id="btnPlay">暂停</button>
+    <button id="btnReplay">重播</button>
+    <input id="seek" type="range" min="0" max="24" step="0.01" value="0">
+    <span id="tc">00.0 / 24.0</span>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+<script>
+const REC = new URLSearchParams(location.search).has('record');
+if (REC) document.body.classList.add('rec');
+
+const $ = s => document.querySelector(s);
+
+/* ---------- Canvas 画鼠标图标（与 PowerShell 版同一套几何） ---------- */
+const cv = $('#icon'), ctx = cv.getContext('2d');
+const ACC = '#19FAC6';
+function drawIcon(level, color, empty) {
+  const S = 360, s = S;
+  ctx.clearRect(0, 0, S, S);
+  const x0 = s * 0.19, x1 = s * 0.81, y0 = s * 0.06, y1 = s * 0.94;
+  const w = x1 - x0, h = y1 - y0, r = w / 2;
+  const path = new Path2D();
+  path.roundRect(x0, y0, w, h, r);
+
+  ctx.save();
+  ctx.clip(path);
+  ctx.fillStyle = empty; ctx.fillRect(x0, y0, w, h);
+  if (level > 0) {
+    const top = y1 - h * (level / 100);
+    ctx.fillStyle = color; ctx.fillRect(x0, top, w, y1 - top);
+  }
+  ctx.restore();
+
+  ctx.lineWidth = Math.max(6, s * 0.028);
+  ctx.strokeStyle = '#262A30'; ctx.stroke(path);
+
+  const ww = s * 0.16, wh = s * 0.20, wx = s * 0.5 - ww / 2, wy = y0 + h * 0.13;
+  const wp = new Path2D(); wp.roundRect(wx, wy, ww, wh, ww / 2);
+  ctx.fillStyle = '#262A30'; ctx.fill(wp);
+  ctx.beginPath(); ctx.moveTo(s * 0.5, wy + wh + 8); ctx.lineTo(s * 0.5, y0 + h * 0.42);
+  ctx.lineWidth = 7; ctx.strokeStyle = '#262A30'; ctx.stroke();
+}
+drawIcon(0, ACC, '#2A3230');
+
+/* ---------- 时间轴 ---------- */
+const CMD = 'mouse --battery';
+const cmdProxy = { n: 0 };
+$('#typed').textContent = '';
+
+gsap.set(['#s2', '#s3', '#s4', '#s5'], { opacity: 0 });
+
+const tl = gsap.timeline({ paused: true, onComplete: () => { window.__DONE = true; } });
+
+/* S1 —— 打字 */
+tl.to('#cur1', { opacity: 1, duration: .18 }, 0);
+tl.to(cmdProxy, {
+  n: CMD.length, duration: 0.72, ease: 'none',
+  onUpdate: () => { $('#typed').textContent = CMD.slice(0, Math.round(cmdProxy.n)); }
+}, 0.55);
+tl.to('#cur1', { opacity: 0, duration: .35, repeat: 2, yoyo: true, ease: 'none' }, 1.4);
+tl.to('#s1', { opacity: 0, duration: .35, ease: 'power1.in' }, 3.05);
+
+/* S2 —— 已连接 ≠ 还有电 */
+tl.to('#s2', { opacity: 1, duration: .3 }, 3.2);
+tl.fromTo('#s2 .inner', { scale: 1 }, { scale: 1.04, duration: 4.2, ease: 'none' }, 3.2);
+tl.fromTo('#s2 .panel', { y: 14, opacity: 0 }, { y: 0, opacity: 1, duration: .5, ease: 'power2.out' }, 3.3);
+tl.fromTo('#bar2', { x: -6 }, { x: 6, duration: .1, repeat: 3, yoyo: true, ease: 'none' }, 4.4);
+tl.fromTo('#s2 .verdict', { y: 26, opacity: 0 }, { y: 0, opacity: 1, duration: .7, ease: 'expo.out' }, 4.3);
+tl.to('#s2', { opacity: 0, duration: .35, ease: 'power1.in' }, 7.3);
+
+/* S3 —— 图标 + 计数器 */
+tl.to('#s3', { opacity: 1, duration: .3 }, 7.6);
+tl.fromTo('#icon', { scale: .6, opacity: 0 },
+  { scale: 1, opacity: 1, duration: 1.0, ease: 'elastic.out(1,.62)' }, 7.7);
+const pc = { v: 0 };
+tl.to(pc, {
+  v: 44, duration: 2.2, ease: 'power4.out',
+  onUpdate: () => {
+    const v = Math.round(pc.v);
+    $('#pct').textContent = v;
+    const c = v > 40 ? '#19FAC6' : v > 15 ? '#FFC036' : '#F0503C';
+    drawIcon(v, c, '#5A6373');
+  }
+}, 8.3);
+tl.fromTo('#s3 .note', { y: 16, opacity: 0 }, { y: 0, opacity: 1, duration: .6, ease: 'power2.out' }, 9.4);
+tl.fromTo('#s3 .cap', { opacity: 0 }, { opacity: 1, duration: .5 }, 9.8);
+tl.to('#s3', { opacity: 0, duration: .35, ease: 'power1.in' }, 12.45);
+
+/* S4 —— 链路 */
+tl.to('#hud', { opacity: 1, duration: .5 }, 12.8);
+tl.to('#s4', { opacity: 1, duration: .3 }, 12.9);
+tl.fromTo('#s4h', { y: 18, opacity: 0 }, { y: 0, opacity: 1, duration: .6, ease: 'power2.out' }, 13.0);
+const nodes = ['#n1', '#n2', '#n3', '#n4'], links = ['#l1', '#l2', '#l3'];
+nodes.forEach((n, i) => {
+  const el = document.querySelector(n);
+  tl.fromTo(n, { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: .45, ease: 'power2.out' }, 13.5 + i * .62);
+  tl.call(() => el.classList.add('on'), null, 13.5 + i * .62 + .22);
+  tl.fromTo(n, { boxShadow: 'inset 0 0 0 0 rgba(25,250,198,.9)' },
+    { boxShadow: 'inset 0 0 0 1px rgba(25,250,198,.35)', duration: .8, ease: 'power2.out' }, 13.5 + i * .62);
+});
+links.forEach((l, i) => {
+  tl.fromTo(l, { scaleX: 0 }, { scaleX: 1, duration: .5, ease: 'power2.inOut' }, 13.85 + i * .62);
+});
+tl.to('#s4', { opacity: 0, duration: .35, ease: 'power1.in' }, 18.1);
+
+/* S5 —— 字标 */
+tl.to('#s5', { opacity: 1, duration: .3 }, 18.4);
+const brand = $('#brand');
+'MOUSE POWER TRAY'.split('').forEach((ch, i) => {
+  const sp = document.createElement('span');
+  sp.textContent = ch === ' ' ? '\u00A0' : ch;
+  brand.appendChild(sp);
+});
+tl.fromTo('#brand span', { y: 34, opacity: 0 },
+  { y: 0, opacity: 1, duration: .5, stagger: .035, ease: 'power3.out' }, 18.6);
+tl.fromTo('#s5sub', { y: 12, opacity: 0 }, { y: 0, opacity: 1, duration: .55, ease: 'power2.out' }, 19.6);
+tl.fromTo('#s5facts div', { y: 12, opacity: 0 },
+  { y: 0, opacity: 1, duration: .5, stagger: .09, ease: 'power2.out' }, 20.1);
+tl.fromTo('#s5url', { opacity: 0 }, { opacity: 1, duration: .5 }, 20.8);
+
+/* 进度条 */
+tl.to('#prog', { width: '100%', duration: 24, ease: 'none' }, 0);
+
+/* ---------- 播放器 ---------- */
+// 逐帧捕获接口：录制脚本按 1/60 秒推进时间轴，保证每一帧确定、可复现
+window.seekTo = t => { tl.pause(); tl.time(t, false); };
+
+const seek = $('#seek'), tc = $('#tc'), btnPlay = $('#btnPlay');
+function fmt(t) { return String(Math.floor(t)).padStart(2, '0') + '.' + String(Math.floor((t % 1) * 10)); }
+tl.eventCallback('onUpdate', () => {
+  const t = tl.time();
+  seek.value = t; tc.textContent = fmt(t) + ' / 24.0';
+});
+$('#btnPlay').onclick = () => {
+  if (tl.paused()) { tl.play(); btnPlay.textContent = '暂停'; }
+  else { tl.pause(); btnPlay.textContent = '播放'; }
+};
+$('#btnReplay').onclick = () => { tl.restart(); btnPlay.textContent = '暂停'; };
+seek.oninput = e => tl.time(parseFloat(e.target.value));
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); $('#btnPlay').click(); }
+});
+
+if (REC) { tl.play(0); } else { tl.play(0); }
+</script>
+</body>
+</html>
