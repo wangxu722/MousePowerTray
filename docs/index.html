@@ -198,8 +198,8 @@
 <section id="how">
   <div class="wrap">
     <div class="sec-h">02 / 原理</div>
-    <h2 class="sec-t">不逆向协议，只读系统已经采好的数</h2>
-    <p class="sec-d">很多厂商把电量藏在自己的软件窗口里，关掉软件就看不见 —— 那意味着每家都要抓包逆向一遍。MousePowerTray 走的是标准链路。</p>
+    <h2 class="sec-t">蓝牙读系统缓存，<br>2.4G 只读监听</h2>
+    <p class="sec-d">很多厂商把电量藏在自己的软件窗口里，关掉软件就看不见。MousePowerTray 走两条路：蓝牙用系统已经采好的标准服务，2.4G 只打开接收器的厂商通道旁听，两条都不写设备、不改设置。</p>
 
     <div class="flow">
       <div class="node"><div class="t">鼠标</div><div class="d">蓝牙 LE</div></div>
@@ -212,6 +212,23 @@
       <div class="lnk">▶</div>
       <div class="node"><div class="t">托盘图标</div><div class="d">GDI+ 现画</div></div>
     </div>
+
+    <div class="flow" style="margin-top:14px">
+      <div class="node"><div class="t">鼠标</div><div class="d">2.4G 无线</div></div>
+      <div class="lnk">▶</div>
+      <div class="node"><div class="t">接收器 0xFFxx</div><div class="d">厂商私有通道</div></div>
+      <div class="lnk">▶</div>
+      <div class="node"><div class="t">状态帧 00 D1 ··</div><div class="d">33 字节，事件触发</div></div>
+      <div class="lnk">▶</div>
+      <div class="node"><div class="t">按偏移取值</div><div class="d">只读，不写设备</div></div>
+      <div class="lnk">▶</div>
+      <div class="node"><div class="t">托盘图标</div><div class="d">同一套状态机</div></div>
+    </div>
+
+    <p class="sec-d" style="margin-top:40px">
+      读不到电量？托盘菜单里有<b>「读不到电量？收集诊断信息…」</b>，会在桌面生成一份可以直接发出去的
+      <b>诊断包</b>（报告 + 日志 + 抓包）。报告末尾直接写明结论：本来就能用、需要适配、还是这台设备根本没暴露电量 —— 不用自己判断。
+    </p>
   </div>
 </section>
 
@@ -267,7 +284,7 @@
       </div>
       <div>
         <ul>
-          <li><span class="no">✗</span><b>其它品牌的 2.4G 接收器</b><span class="muted">，帧格式不同，需单独适配</span></li>
+          <li><span class="no">✗</span><b>其它品牌的 2.4G 接收器</b><span class="muted">，帧格式不同 —— 可用诊断包按流程补</span></li>
           <li><span class="no">✗</span><b>纯经典蓝牙耳机</b><span class="muted">，电量不落进系统</span></li>
           <li><span class="no">✗</span><b>手环</b><span class="muted">，私有服务 + 需要 auth key</span></li>
         </ul>

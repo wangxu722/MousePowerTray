@@ -68,7 +68,7 @@
         <table class="spec">
           <tr><td>显示</td><td>16×16 托盘图标 · 按电量填充</td></tr>
           <tr><td>读数</td><td><span class="hl bar">█████████░░░░░░░░░░░</span> 44%</td></tr>
-          <tr><td>来源</td><td>系统 BLE 电池服务缓存</td></tr>
+          <tr><td>来源</td><td>BLE 电池服务缓存 / 2.4G 状态帧</td></tr>
           <tr><td>刷新</td><td>10 秒 / 次（单次约 2 秒）</td></tr>
           <tr><td>体积</td><td>27.2 KB · 零依赖 · 免编译</td></tr>
           <tr><td>权限</td><td>不需要管理员</td></tr>
@@ -96,7 +96,7 @@
         <table class="cmp">
           <tr><th style="width:34%">场景</th><th>系统设置</th><th>MousePowerTray</th></tr>
           <tr><td>蓝牙 LE 鼠标</td><td class="n">有设备，无电量</td><td class="y">图标 + 百分比</td></tr>
-          <tr><td>2.4G 接收器鼠标</td><td class="n">无接口</td><td class="n">不支持（诚实标注）</td></tr>
+          <tr><td>2.4G 接收器鼠标</td><td class="n">无接口</td><td class="y">图标 + 百分比（已适配机型）</td></tr>
           <tr><td>断开 / 关机</td><td class="n">无感知</td><td class="y">整只灰显 + 最后值</td></tr>
           <tr><td>低电量</td><td class="n">无提醒</td><td class="y">≤15% 弹一次气泡</td></tr>
           <tr><td>多设备</td><td class="n">翻列表</td><td class="y">菜单里切换</td></tr>
@@ -152,6 +152,8 @@
       <div class="flow-paper">
         鼠标 ──BLE──▶ <i>GATT 0x180F</i> ──▶ <i>0x2A19</i> ──▶ Windows 缓存 ──▶ <b>DEVPKEY_Bluetooth_Battery</b> ──▶ <b>托盘</b><br>
         <span style="padding-left:0">　　　　　　　标准电池服务　　　电量 uint8　　　系统自己采　　　只读读取，不抓包　　　GDI+ 现画</span>
+        <div style="margin-top:12px">鼠标 ──RF──▶ <i>接收器 0xFFxx</i> ──▶ 状态帧 <i>00 D1 ··</i> ──▶ 按偏移取值 ──▶ <b>托盘</b></div>
+        <span style="padding-left:0">　　　　　　　厂商私有通道　　　33 字节，事件触发　　　只读监听，不写设备</span>
       </div>
     </div>
 
@@ -160,8 +162,8 @@
         <div class="title-md" style="margin-bottom:10px">支持 / 不支持</div>
         <table class="cmp" style="font-size:12px">
           <tr><td class="y" style="width:22px">✓</td><td>任何实现标准 BLE 电池服务的输入设备</td></tr>
+          <tr><td class="y">✓</td><td><b>2.4G 接收器</b>：已适配 AULA 089D:062F，其它可按诊断配置</td></tr>
           <tr><td class="y">✓</td><td>鼠标 / 键盘 / 部分手柄，多台可切换</td></tr>
-          <tr><td class="n">✗</td><td>2.4G 接收器（厂商私有协议，一家一套）</td></tr>
           <tr><td class="n">✗</td><td>纯经典蓝牙耳机、手环（电量不进系统）</td></tr>
         </table>
       </div>
@@ -174,7 +176,8 @@
         </table>
         <div class="tiny" style="color:var(--dim);margin-top:16px;line-height:1.9">
           配置与日志：%LOCALAPPDATA%\MousePowerTray<br>
-          卸载：取消勾选 → 退出 → 删文件夹
+          读不到电量？右键托盘 →「收集诊断信息」<br>
+          会在桌面生成一份可直接发出的报告
         </div>
       </div>
     </div>
