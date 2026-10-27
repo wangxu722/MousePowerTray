@@ -363,6 +363,8 @@ public static class HidBat
 
     public static void Stop() { running = false; }
 
+    public static bool IsRunning { get { return running; } }
+
     public static string Find(int upage, int vid, int pid)
     {
         GUID g; HidD_GetHidGuid(out g);
@@ -490,13 +492,25 @@ function Start-UsbListener {
             $script:UsbWorker = $true
             Write-Log ('USB-START ' + [HidBat]::Path)
         }
-        else { Write-Log 'USB-NOTFOUND' }
+        else { if ($script:Cfg.Debug) { Write-Log 'USB-NOTFOUND' } }
     }
     catch { Write-Log ('USB-INIT-ERR ' + $_.Exception.Message) }
 }
 
 function Update-UsbState {
     if (-not $script:UsbWorker) { return }
+    # 接收器被拔掉 / 读失败 → 线程自己会退出，这里同步状态，之后由定时器重试
+    try {
+        if (-not [HidBat]::IsRunning) {
+            $script:UsbWorker = $false
+            $script:Usb.HasData = $false
+            $script:Usb.Online = $false
+            Write-Log ('USB-STOPPED ' + [HidBat]::Error)
+            Update-Tray
+            return
+        }
+    }
+    catch { }
     $frames = [HidBat]::Poll()
     $changed = $false
     foreach ($f in $frames) {
@@ -548,6 +562,7 @@ $script:State = @{
 }
 # 2.4G 接收器状态（独立于 BLE）
 $script:UsbWorker = $false
+$script:UsbTryAt = [datetime]::MinValue
 $script:Usb = @{ HasData = $false; Level = -1; Online = $false; At = $null; Idle = $false }
 $script:Worker = $null
 $script:WorkerHandle = $null
@@ -689,46 +704,51 @@ function Apply-ProbeResult {
         Write-Log ("PROBE-MISS {0} ({1})" -f $res.Error, $script:FailCount)
         $script:State.Connected = $false
         $script:State.Online = $false
-        if ($script:FailCount -ge 3 -and $script:Cfg.DeviceId) {
-            # 连续 3 次读不到：设备可能被移除或重新配对，重新扫描一次
-            $script:Cfg.DeviceId = ''
-            $script:Cfg.DeviceName = ''
-            Save-Config
+        if ($script:FailCount -ge 3) {
+            # 连续 3 次读不到电量（蓝牙断开、或鼠标切到了 2.4G）：
+            # 只触发一次重扫，不要清掉配置里的设备——切回蓝牙时还得靠它
             $script:FailCount = 0
-            $script:NeedScan = $true
-            $script:State.Mode = 'none'
+            if (-not $script:Cfg.DeviceId) { $script:NeedScan = $true }
         }
     }
 
     Update-Tray
 }
 
+# 统一决定「现在该显示谁」——托盘和浮层都走这里，避免两处逻辑跑偏
+# 优先级：蓝牙在线 > 2.4G 有数据 > 2.4G 接收器在但还没上报 > 蓝牙（离线态）
+function Get-DisplayState {
+    $s = $script:State
+    $bleOnline = [bool]$s.Online
+    $usbReady = $script:UsbWorker -and $script:Usb.HasData
+    $nmBle = if ($s.Name) { $s.Name } else { $script:AppName }
+    $nmUsb = if ($script:Cfg.DeviceName) { $script:Cfg.DeviceName } elseif ($s.Name) { $s.Name } else { $script:AppName }
+
+    if ($bleOnline) {
+        return @{ Mode = 'ble'; Online = $true; Level = $s.Level; LastLevel = $s.LastLevel
+                  Name = $nmBle; Idle = $false; At = $s.LastGoodUpdate }
+    }
+    if ($usbReady) {
+        return @{ Mode = 'usb'; Online = [bool]$script:Usb.Online; Level = $script:Usb.Level
+                  LastLevel = $script:Usb.Level; Name = $nmUsb; Idle = [bool]$script:Usb.Idle; At = $script:Usb.At }
+    }
+    if ($script:UsbWorker) {
+        $lv = if ($script:Cfg.LastUsbLevel -ge 0) { [int]$script:Cfg.LastUsbLevel } else { -1 }
+        return @{ Mode = 'usb'; Online = $false; Level = $lv; LastLevel = $lv
+                  Name = $nmUsb; Idle = $false; At = $null }
+    }
+    return @{ Mode = $s.Mode; Online = $false; Level = $s.LastLevel; LastLevel = $s.LastLevel
+              Name = $nmBle; Idle = $false; At = $s.LastGoodUpdate }
+}
+
 function Update-Tray {
     $s = $script:State
-    # 2.4G 接收器一旦上报过，就以它为准（两种连接方式互斥，谁有数据听谁的）
-    $usb = $script:UsbWorker -and $script:Usb.HasData
-    if ($usb) {
-        $mode = 'usb'
-        $online = [bool]$script:Usb.Online
-        $level = $script:Usb.Level
-        $lastLevel = $script:Usb.Level
-        $nm = if ($script:Cfg.DeviceName) { $script:Cfg.DeviceName } elseif ($s.Name) { $s.Name } else { $script:AppName }
-    }
-    elseif ($script:UsbWorker) {
-        # 接收器在，但还没收到过状态帧（设备只在事件发生时上报）
-        $mode = 'usb'
-        $online = $false
-        $level = if ($script:Cfg.LastUsbLevel -ge 0) { $script:Cfg.LastUsbLevel } else { -1 }
-        $lastLevel = $level
-        $nm = if ($script:Cfg.DeviceName) { $script:Cfg.DeviceName } elseif ($s.Name) { $s.Name } else { $script:AppName }
-    }
-    else {
-        $mode = $s.Mode
-        $online = [bool]$s.Online
-        $level = if ($online) { $s.Level } else { $s.LastLevel }
-        $lastLevel = $s.LastLevel
-        $nm = if ($s.Name) { $s.Name } else { $script:AppName }
-    }
+    $d = Get-DisplayState
+    $mode = $d.Mode
+    $online = $d.Online
+    $level = $d.Level
+    $lastLevel = $d.LastLevel
+    $nm = $d.Name
 
     $sig = '{0}|{1}|{2}' -f $mode, $level, $online
     if ($sig -ne $script:LastPainted) {
@@ -886,24 +906,16 @@ function New-Popup {
         $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
         $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
         $s = $script:State
-        $usbOn = $script:UsbWorker -and $script:Usb.HasData
-        if ($usbOn) {
-            $online = [bool]$script:Usb.Online
-            $level = $script:Usb.Level
-            $modeTag = 'usb'
-            $updAt = $script:Usb.At
-        }
-        else {
-            $online = [bool]$s.Online
-            $level = if ($online) { $s.Level } else { $s.LastLevel }
-            $modeTag = $s.Mode
-            $updAt = $s.LastGoodUpdate
-        }
+        $d = Get-DisplayState
+        $online = $d.Online
+        $level = $d.Level
+        $modeTag = $d.Mode
+        $updAt = $d.At
         if ($level -lt 0) { $level = 0 }
         $accent = Get-StatusColor -Level $level -Online $online
         $brAccent = New-Object System.Drawing.SolidBrush($accent)
 
-        $name = if ($script:Cfg.DeviceName) { $script:Cfg.DeviceName } elseif ($s.Name) { $s.Name } else { $script:AppName }
+        $name = $d.Name
         if ($name.Length -gt 18) { $name = $name.Substring(0, 17) + '…' }
         $g.DrawString($name, $script:FntTitle, $script:BrText, [single]18, [single]14)
 
@@ -912,7 +924,7 @@ function New-Popup {
         }
         elseif ($modeTag -eq 'usb') {
             if (-not $online) { $modeText = '2.4G 接收器 · 已断开' }
-            elseif ($script:Usb.Idle) { $modeText = '2.4G 接收器 · 待机' }
+            elseif ($d.Idle) { $modeText = '2.4G 接收器 · 待机' }
             else { $modeText = '2.4G 接收器 · 已连接' }
         }
         else { $modeText = '未检测到设备' }
@@ -1129,6 +1141,11 @@ $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 1000
 $timer.Add_Tick({
     Update-UsbState
+    # 接收器可能后插上来，没启动过就每 30 秒试一次
+    if (-not $script:UsbWorker -and ((Get-Date) - $script:UsbTryAt).TotalSeconds -ge 30) {
+        $script:UsbTryAt = Get-Date
+        Start-UsbListener
+    }
     if ($script:Worker) { Complete-Probe }
     elseif ($script:PendingRefresh) { $script:PendingRefresh = $false; Start-Probe }
     elseif ($script:VerifyAt -and (Get-Date) -ge $script:VerifyAt) { $script:VerifyAt = $null; Start-Probe }
