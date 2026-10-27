@@ -375,10 +375,18 @@ public static class HidBat
 
     public static bool Start(int upage, int vid, int pid)
     {
-        if (worker != null) return true;
+        if (worker != null)
+        {
+            // 线程还活着就直接复用；已经退了（设备被拔掉）必须清掉引用，
+            // 否则这里永远返回 true，却没有任何线程在读 —— 插回来也起不来。
+            if (running) { return true; }
+            try { worker.Join(400); } catch { }
+            worker = null;
+        }
         string path = Find(upage, vid, pid);
         if (path == null) return false;
         Path = path;
+        Error = "";
         running = true;
         worker = new Thread(Loop);
         worker.IsBackground = true;
@@ -386,7 +394,15 @@ public static class HidBat
         return true;
     }
 
-    public static void Stop() { running = false; }
+    public static void Stop()
+    {
+        running = false;
+        if (worker != null)
+        {
+            try { worker.Join(600); } catch { }
+            worker = null;
+        }
+    }
 
     public static bool IsRunning { get { return running; } }
 
@@ -581,25 +597,31 @@ public static class HidBat
     }
 
     // ---- 诊断用：同时监听多条厂商通道，把每一帧带时间戳交给回调 ----
-    // targets 每项为 "usagePage:int,len:int"，返回实际启动了几条
+    // targets 每项为 "usagePage:len:vid:pid"（统一十进制，vid/pid 可为 0 = 不校验），
+    // 返回实际启动了几条。
+    // 必须带 VID/PID：光按 usagePage 找会撞上触摸板那类同样用 0xFFxx 的设备。
     static volatile bool capturing = false;
-        public static string CapError = "";
+    static int captureGen = 0;
+    public static string CapError = "";
 
     public static int CaptureStart(string[] targets)
     {
         StopCapture();
+        int gen = ++captureGen;      // 代际令牌：让上一轮的旧线程自己退出
         capturing = true;
         int ok = 0;
         foreach (var t in targets)
         {
             var parts = t.Split(':');
             int upage = int.Parse(parts[0]), len = int.Parse(parts[1]);
-            string path = Find(upage, 0, 0);
-            if (path == null) continue;
+            int vid = parts.Length > 2 ? int.Parse(parts[2]) : 0;
+            int pid = parts.Length > 3 ? int.Parse(parts[3]) : 0;
+            string path = Find(upage, vid, pid);
+            if (path == null) { CapError = CapError + "find " + upage.ToString("X4") + " not-found; "; continue; }
             IntPtr h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero,
                                    OPEN_EXISTING, FILE_FLAG_OVERLAPPED, IntPtr.Zero);
             if (h == INVALID) { CapError += "open " + upage.ToString("X4") + " err=" + Marshal.GetLastWin32Error() + "; "; continue; }
-            var arg = new object[] { h, len, upage };
+            var arg = new object[] { h, len, upage, gen };
             var th = new Thread(CaptureLoop);
             th.IsBackground = true;
             th.Start(arg);
@@ -617,10 +639,11 @@ public static class HidBat
         IntPtr h = (IntPtr)a[0];
         int len = (int)a[1];
         int upage = (int)a[2];
+        int myGen = (int)a[3];
         var buf = new byte[4096];
         try
         {
-            while (capturing)
+            while (capturing && myGen == captureGen)
             {
                 int got = ReadWithTimeout(h, buf, len == 0 ? 64 : len, 400);
                 if (got > 0)
@@ -670,6 +693,8 @@ function Update-UsbState {
             $script:Usb.Online = $false
             Write-Log ('USB-STOPPED ' + [HidBat]::Error)
             Update-Tray
+            # 立刻试着重连一次：接收器刚插回来就能用，不用干等 30 秒
+            Start-UsbListener
             return
         }
     }
@@ -749,6 +774,7 @@ $script:PendingRefresh = $false        # 刷新时正好有探测在跑 → 排�
 $script:VerifyAt = $null               # 手动刷新后的二次确认时刻（PnP 移除有延迟）
 $script:PickerPending = $false
 $script:FailCount = 0
+$script:MissStreak = 0                # 连续读不到设备的次数（成功即清零）
 $script:LastPainted = ''
 $script:IconStream = $null
 $script:PopupUntil = [datetime]::MinValue
@@ -845,12 +871,25 @@ function Apply-ProbeResult {
         # 扫描结果是排序过的，优先取配置里那台，别因为排序换成了别的设备
         if ($script:Cfg.DeviceId) {
             $dev = @($res.Devices) | Where-Object { $_.Id -eq $script:Cfg.DeviceId } | Select-Object -First 1
+            if (-not $dev) {
+                # 配置里那台不在了：多半是重新配对导致 InstanceId 变了。
+                # 换到唯一可用的一台，并把配置一起更新，否则永远读不到。
+                $alt = @($res.Devices | Where-Object { $_ })[0]
+                if ($alt) {
+                    Write-Log ('DEVICE-SWITCH {0} -> {1} ({2})' -f $script:Cfg.DeviceId, $alt.Id, $alt.Name)
+                    $script:Cfg.DeviceId = $alt.Id
+                    $script:Cfg.DeviceName = $alt.Name
+                    Save-Config
+                    $dev = $alt
+                }
+            }
         }
-        if (-not $dev) { $dev = @($res.Devices)[0] }
+        if (-not $dev) { $dev = @($res.Devices | Where-Object { $_ })[0] }
     }
 
     if ($dev) {
         $script:FailCount = 0
+        $script:MissStreak = 0
         if ($script:Cfg.Debug) {
             Write-Log ('POLL {0} {1}% online={2}' -f $dev.Name, $dev.Level, $dev.Online)
         }
@@ -876,14 +915,17 @@ function Apply-ProbeResult {
     }
     else {
         $script:FailCount++
-        Write-Log ("PROBE-MISS {0} ({1})" -f $res.Error, $script:FailCount)
+        $script:MissStreak++
+        Write-Log ("PROBE-MISS {0} (连续 {1})" -f $res.Error, $script:MissStreak)
         $script:State.Connected = $false
         $script:State.Online = $false
-        if ($script:FailCount -ge 3) {
-            # 连续 3 次读不到电量（蓝牙断开、或鼠标切到了 2.4G）：
-            # 只触发一次重扫，不要清掉配置里的设备——切回蓝牙时还得靠它
-            $script:FailCount = 0
-            if (-not $script:Cfg.DeviceId) { $script:NeedScan = $true }
+        # 连续读不到超过 15 次（约 2.5 分钟）就重扫一次。
+        # 设备重新配对后 InstanceId 会变，只查旧 Id 是永远查不到的。
+        # 这里不清配置里的设备 —— 鼠标切到 2.4G 时也会读不到，不能因此把选择弄丢。
+        if ($script:MissStreak -ge 15) {
+            $script:MissStreak = 0
+            $script:ForceRescan = $true
+            Write-Log 'RESCAN after repeated misses'
         }
     }
 
@@ -1046,6 +1088,8 @@ function Show-Picker {
         $script:PickerPending = $true
         $script:NeedScan = $true
         $f.Close()
+        # 立刻扫一次，别让用户干等到下一个轮询周期
+        if ($script:Worker) { $script:PendingRefresh = $true } else { Start-Probe -Scan }
     })
     $btnCancel.Add_Click({ $f.Close() })
 
@@ -1105,7 +1149,8 @@ function New-Popup {
         else { $modeText = '未检测到设备' }
         $g.DrawString($modeText, $script:FntSub, $script:BrSub, [single]18, [single]38)
 
-        $pctText = if ($level -ge 0 -and $s.Mode -eq 'ble') { '{0}%' -f $level } else { '--' }
+        # 百分比用原始读数判断：$level 已经被夹到 0，拿它判空会把"没数据"显示成 0%
+        $pctText = if ($d.Level -ge 0) { '{0}%' -f $d.Level } else { '--' }
         $sz = $g.MeasureString($pctText, $script:FntBig)
         $g.DrawString($pctText, $script:FntBig, $brAccent, [single](286 - $sz.Width), [single]10)
 
@@ -1125,9 +1170,13 @@ function New-Popup {
         $g.DrawString(('数据更新 {0}   ·   {1}' -f $upd, $refreshText),
             $script:FntSub, $script:BrSub, [single]18, [single]88)
 
-        if ($s.Mac) {
+        if ($modeTag -eq 'ble' -and $s.Mac) {
             $mac = $s.Mac -replace '(..)(..)(..)(..)(..)(..)', '$1:$2:$3:$4:$5:$6'
             $g.DrawString(('设备 {0}' -f $mac), $script:FntHint, $script:BrSub, [single]18, [single]106)
+        }
+        elseif ($modeTag -eq 'usb' -and $script:Cfg.UsbVid) {
+            $g.DrawString(('接收器 {0}:{1}   通道 0x{2}' -f $script:Cfg.UsbVid, $script:Cfg.UsbPid, $script:Cfg.UsbUsagePage),
+                $script:FntHint, $script:BrSub, [single]18, [single]106)
         }
         $g.DrawString('点击任意处关闭', $script:FntHint, $script:BrSub, [single]206, [single]120)
         $brAccent.Dispose()
@@ -1180,6 +1229,8 @@ function Set-Autostart {
 function Stop-App {
     try { $script:NotifyIcon.Visible = $false; $script:NotifyIcon.Dispose() } catch { }
     try { if ($script:Popup) { $script:Popup.Dispose() } } catch { }
+    # 收掉 HID 读线程，别让它占着设备句柄不放
+    try { if ('HidBat' -as [type]) { [HidBat]::Stop(); [HidBat]::StopCapture() } } catch { }
     try { if ($script:Mutex) { $script:Mutex.ReleaseMutex(); $script:Mutex.Dispose() } } catch { }
     Write-Log 'EXIT'
     [System.Windows.Forms.Application]::ExitThread()
@@ -1231,8 +1282,11 @@ function Get-DiagBle {
 function Get-DiagUsb {
     # 返回全部 HID 接口（含键鼠本体），供人眼判断哪个是接收器的厂商通道
     $rows = New-Object System.Collections.ArrayList
+    $script:DiagUsbOk = $false
     if (-not (Initialize-HidType)) { return $rows }
-    foreach ($line in [HidBat]::Enumerate()) {
+    $raw = [HidBat]::Enumerate()
+    if (-not $raw -or $raw[0] -eq 'ENUM-FAILED') { return $rows }
+    foreach ($line in $raw) {
         if ($line -eq 'ENUM-FAILED') { continue }
         $f = $line -split '\|'
         if ($f.Count -lt 9) { continue }
@@ -1249,6 +1303,7 @@ function Get-DiagUsb {
             Product = $f[7]; InstanceId = $inst; Bus = $bus
         })
     }
+    $script:DiagUsbOk = ($rows.Count -gt 0)
     return $rows
 }
 
@@ -1309,7 +1364,12 @@ function Get-DiagConclusion {
         [void]$out.Add('')
         $first = @($vendorGroups[0].Group)[0]
         [void]$out.Add('适配后 config.json 需要写：')
-        [void]$out.Add(('  "UsbVid": "{0}",  "UsbPid": "{1}",  "UsbUsagePage": "{2}"' -f $first.Vid, $first.Pid, $first.Upage))
+        foreach ($g in $vendorGroups) {
+            $u0 = @($g.Group)[0]
+            [void]$out.Add(('  "UsbVid": "{0}",  "UsbPid": "{1}",  "UsbUsagePage": "{2}"   ({3})' -f
+                $u0.Vid, $u0.Pid, $u0.Upage, $u0.Product))
+        }
+        [void]$out.Add('（多个接收器时，填你实际在用的那个）')
         return $out
     }
 
@@ -1330,6 +1390,11 @@ function Get-DiagConclusion {
 
     [void]$out.Add('结论：既没有蓝牙电量，也没有厂商自定义通道 —— 无法支持。')
     [void]$out.Add('')
+    if (-not $script:DiagUsbOk) {
+        [void]$out.Add('注意：本次 HID 接口枚举失败，所以"没有厂商通道"这一条不能确定。')
+        [void]$out.Add('请重新收集一次；如果还是失败，多半是某个设备驱动独占了 HID 接口。')
+        [void]$out.Add('')
+    }
     [void]$out.Add('可能原因：')
     [void]$out.Add('  · 鼠标当前没连上（蓝牙未连接、接收器没插）')
     [void]$out.Add('  · 鼠标走纯经典蓝牙（BR/EDR），电量只在 HFP 通道里')
@@ -1465,7 +1530,9 @@ function Invoke-Diagnose {
     # ---- HID ----
     & $add '--- 三、HID 接口清单 ---'
     $usb = @(Get-DiagUsb)
-    if ($usb.Count -eq 0) { & $add '  （枚举失败，见下方错误）' }
+    if ($usb.Count -eq 0) {
+        & $add ('  （枚举失败：' + $(if ($script:DiagUsbOk) { '没有可用接口' } else { 'HID 接口列表拿不到' }) + '）')
+    }
     else {
         & $add '  总线  VID:PID   UsagePage Usage  In Out Feat  产品名'
         foreach ($u in $usb) {
@@ -1510,7 +1577,8 @@ function Invoke-Diagnose {
             $targets = @()
             foreach ($v in $vendor) {
                 $inc = if ($v.In -gt 0) { $v.In } else { 64 }
-                $targets += ('{0}:{1}' -f [Convert]::ToInt32($v.Upage, 16), $inc)
+                $targets += ('{0}:{1}:{2}:{3}' -f [Convert]::ToInt32($v.Upage, 16), $inc,
+                    [Convert]::ToInt32($v.Vid, 16), [Convert]::ToInt32($v.Pid, 16))
             }
             $n = [HidBat]::CaptureStart($targets)
             & $add ('  已启动 {0} 条通道：{1}' -f $n, ($targets -join ', '))
@@ -1680,7 +1748,13 @@ $script:BrTrack = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::F
 $script:NotifyIcon = New-Object System.Windows.Forms.NotifyIcon
 $script:NotifyIcon.Visible = $true
 $script:NotifyIcon.Text = $script:AppName
-$script:NotifyIcon.Icon = (ConvertTo-TrayIcon -Bitmap (New-MouseBitmap -Size 16 -Level -1 -Online $false)).Icon
+# 初始图标：Icon 是从流里惰性读数据的，流必须一直留着，
+# 否则被 GC 回收后托盘图标会变成空白。
+$bmp0 = New-MouseBitmap -Size 16 -Level -1 -Online $false
+$pack0 = ConvertTo-TrayIcon -Bitmap $bmp0
+$bmp0.Dispose()
+$script:NotifyIcon.Icon = $pack0.Icon
+$script:IconStream = $pack0.Stream
 
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $script:MenuHeader = New-Object System.Windows.Forms.ToolStripMenuItem('  正在识别设备…')
@@ -1762,8 +1836,9 @@ $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 1000
 $timer.Add_Tick({
     Update-UsbState
-    # 接收器可能后插上来，没启动过就每 30 秒试一次
-    if (-not $script:UsbWorker -and ((Get-Date) - $script:UsbTryAt).TotalSeconds -ge 30) {
+    # 接收器可能后插上来，没启动过就每 30 秒试一次（没配置厂商通道就别空转）
+    if ($script:Cfg.UsbUsagePage -and -not $script:UsbWorker -and
+        ((Get-Date) - $script:UsbTryAt).TotalSeconds -ge 30) {
         $script:UsbTryAt = Get-Date
         Start-UsbListener
     }

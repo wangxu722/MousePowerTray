@@ -8,7 +8,7 @@
 > 只读、不装驱动、不联网。只是把 Windows 已经采好的电量画到托盘上。
 
 - 官网 / 宣传页：**https://wangxu722.github.io/MousePowerTray/**
-- 下载：[`dist/MousePowerTray.zip`](dist/MousePowerTray.zip)（27.2 KB）
+- 下载：[`dist/MousePowerTray.zip`](dist/MousePowerTray.zip)（不到 30 KB）
 
 ---
 
