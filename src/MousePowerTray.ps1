@@ -980,12 +980,14 @@ function Update-UsbState {
         if ($script:Cfg.LastUsbLevel -ne $lv) { $script:Cfg.LastUsbLevel = $lv; Save-Config }
     }
 
-    # 连续 180 秒没有任何帧，才认为真的关了 / 走远了（上报间隔实测约 1–1.5 分钟）
+    # 2.4G 离线判定：放宽至 1800 秒（30分钟）。
+    # 很多 2.4G 鼠标（如狼蛛 SC580）仅在电量跳变或开机唤醒时推帧，正常使用中电量长时间未降属于正常物理现象，
+    # 只要 USB 接收器未被拔除且仍在监听，维持在线与最后电量，避免误判断开。
     if ($script:Usb.HasData -and $script:Usb.Online) {
-        if (((Get-Date) - $script:Usb.At).TotalSeconds -gt 180) {
+        if (((Get-Date) - $script:Usb.At).TotalSeconds -gt 1800) {
             $script:Usb.Online = $false
             $changed = $true
-            Write-Log 'USB-OFFLINE (no frame in 180s)'
+            Write-Log 'USB-OFFLINE (no frame in 1800s)'
         }
     }
 
@@ -2078,6 +2080,12 @@ if ($SelfTest) {
 $script:Mutex = New-Object System.Threading.Mutex($false, 'Local\MousePowerTray')
 if (-not $script:Mutex.WaitOne(0)) {
     Write-Log 'EXIT duplicate instance'
+    $alertMsg = "鼠标电量托盘已经在后台运行中。`r`n`r`n请查看任务栏右下角托盘图标（可能在折叠箭头 ^ 内部）。`r`n如需完全重新启动，请先右键托盘图标选择[退出]。"
+    [void][System.Windows.Forms.MessageBox]::Show(
+        $alertMsg,
+        $script:AppName,
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information)
     exit 0
 }
 
