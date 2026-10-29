@@ -926,7 +926,7 @@ function Find-UsbPreset {
         foreach ($row in $enumRows) {
             $parts = $row -split '\|'
             if ($parts.Count -lt 9) { continue }
-            $vid = $parts[0]; $pid = $parts[1]; $upage = $parts[2]
+            $vid = $parts[0]; $devPid = $parts[1]; $upage = $parts[2]
             $inLen = 0
             try { $inLen = [int]$parts[4] } catch { }
             if ($inLen -le 0) { continue }
@@ -941,7 +941,7 @@ function Find-UsbPreset {
                         return @{
                             Brand       = $p.Brand
                             Vid         = $vid
-                            Pid         = $pid
+                            Pid         = $devPid
                             UsagePage   = $upage
                             FrameType   = $p.FrameType
                             LevelIdx    = $p.LevelIdx
@@ -958,7 +958,7 @@ function Find-UsbPreset {
         foreach ($row in $enumRows) {
             $parts = $row -split '\|'
             if ($parts.Count -lt 9) { continue }
-            $vid = $parts[0]; $pid = $parts[1]; $upage = $parts[2]
+            $vid = $parts[0]; $devPid = $parts[1]; $upage = $parts[2]
             $inLen = 0
             try { $inLen = [int]$parts[4] } catch { }
             if ($inLen -le 0) { continue }
@@ -970,7 +970,7 @@ function Find-UsbPreset {
                 return @{
                     Brand       = 'Generic USB'
                     Vid         = $vid
-                    Pid         = $pid
+                    Pid         = $devPid
                     UsagePage   = $upage
                     FrameType   = ''
                     LevelIdx    = -1
@@ -990,17 +990,17 @@ function Start-UsbListener {
 
     $vid = 0; $pid_ = 0; $upage = 0
     if ($script:Cfg.UsbUsagePage) {
-        if ($script:Cfg.UsbVid) { $vid = [Convert]::ToInt32(('0x' + $script:Cfg.UsbVid), 16) }
-        if ($script:Cfg.UsbPid) { $pid_ = [Convert]::ToInt32(('0x' + $script:Cfg.UsbPid), 16) }
-        $upage = [Convert]::ToInt32(('0x' + $script:Cfg.UsbUsagePage), 16)
+        try { if ($script:Cfg.UsbVid) { $vid = [Convert]::ToInt32(('0x' + $script:Cfg.UsbVid), 16) } } catch { }
+        try { if ($script:Cfg.UsbPid) { $pid_ = [Convert]::ToInt32(('0x' + $script:Cfg.UsbPid), 16) } } catch { }
+        try { if ($script:Cfg.UsbUsagePage) { $upage = [Convert]::ToInt32(('0x' + $script:Cfg.UsbUsagePage), 16) } } catch { }
     }
     else {
         # 自动从主流预设库中识别已连接的接收器
         $preset = Find-UsbPreset
         if ($preset) {
-            $vid = [Convert]::ToInt32(('0x' + $preset.Vid), 16)
-            $pid_ = [Convert]::ToInt32(('0x' + $preset.Pid), 16)
-            $upage = [Convert]::ToInt32(('0x' + $preset.UsagePage), 16)
+            try { if ($preset.Vid) { $vid = [Convert]::ToInt32(('0x' + $preset.Vid), 16) } } catch { }
+            try { if ($preset.Pid) { $pid_ = [Convert]::ToInt32(('0x' + $preset.Pid), 16) } } catch { }
+            try { if ($preset.UsagePage) { $upage = [Convert]::ToInt32(('0x' + $preset.UsagePage), 16) } } catch { }
             $script:ActivePreset = $preset
             Write-Log ('USB-PRESET-MATCH brand={0} vid:pid={1}:{2} upage=0x{3}' -f $preset.Brand, $preset.Vid, $preset.Pid, $preset.UsagePage)
         }
@@ -1015,7 +1015,15 @@ function Start-UsbListener {
         }
         if ([HidBat]::Start($upage, $vid, $pid_)) {
             $script:UsbWorker = $true
+            # 接收器物理插着并成功开启监听，标记在线就绪，绝不默认为断开
+            $script:Usb.Online = $true
+            $script:Usb.At = Get-Date
+            if ($script:Cfg.LastUsbLevel -ge 0) {
+                $script:Usb.Level = [int]$script:Cfg.LastUsbLevel
+                $script:Usb.HasData = $true
+            }
             Write-Log ('USB-START ' + [HidBat]::Path)
+            Update-Tray
         }
         else { if ($script:Cfg.Debug) { Write-Log 'USB-NOTFOUND' } }
     }
@@ -1362,17 +1370,19 @@ function Get-DisplayState {
              else { '2.4G 无线鼠标' }
 
     # 1. 优先展示真正处于活跃连接的设备
+    if ($usbOnline) {
+        $lv = if ($script:Usb.HasData) { $script:Usb.Level }
+              elseif ($script:Cfg.LastUsbLevel -ge 0) { [int]$script:Cfg.LastUsbLevel }
+              else { -1 }
+        return @{ Mode = 'usb'; Online = $true; Level = $lv
+                  LastLevel = $lv; Name = $nmUsb; Idle = [bool]$script:Usb.Idle; At = $script:Usb.At }
+    }
     if ($bleOnline) {
         return @{ Mode = 'ble'; Online = $true; Level = $s.Level; LastLevel = $s.LastLevel
                   Name = $nmBle; Idle = $false; At = $s.LastGoodUpdate }
     }
-    if ($usbOnline) {
-        return @{ Mode = 'usb'; Online = $true; Level = $script:Usb.Level
-                  LastLevel = $script:Usb.Level; Name = $nmUsb; Idle = [bool]$script:Usb.Idle; At = $script:Usb.At }
-    }
 
-    # 2. 核心优先：系统当前插入了 2.4G 接收器（正在监听）且蓝牙离线时，
-    # 绝对优先呈现 2.4G 接收器，坚决不被历史离线蓝牙电量霸占覆盖！
+    # 2. 接收器插着但处于离线状态
     if ($script:UsbWorker) {
         $lv = if ($script:Usb.HasData) { $script:Usb.Level }
               elseif ($script:Cfg.LastUsbLevel -ge 0) { [int]$script:Cfg.LastUsbLevel }
