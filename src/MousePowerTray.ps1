@@ -819,6 +819,20 @@ $script:UsbPresets = @(
     @{ Brand = 'Rapoo';    Vid = '24AE'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
     # 迈从 MCHOSE (A5 / AX5 / G3 等)
     @{ Brand = 'MCHOSE';   Vid = '3554'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
+    # 英菲克 Inphic (IN9 / PG6 / PM6 等原相方案)
+    @{ Brand = 'Inphic';   Vid = '093A'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
+    @{ Brand = 'Inphic';   Vid = '093A'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
+    # 漫步者 HECATE (G3M Pro / G4M Pro 等)
+    @{ Brand = 'HECATE';   Vid = '2E8A'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
+    @{ Brand = 'HECATE';   Vid = '2E8A'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
+    # 多彩 DeLUX (M800 Pro / M618 人体工学系列)
+    @{ Brand = 'DeLUX';    Vid = '248A'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
+    @{ Brand = 'DeLUX';    Vid = '248A'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
+    # 黑爵 AJAZZ (AJ199 / AJ139 / AJ159 等)
+    @{ Brand = 'AJAZZ';    Vid = '0C45'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
+    @{ Brand = 'AJAZZ';    Vid = '0C45'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
+    # 红魔 RedMagic (电竞无线系列)
+    @{ Brand = 'RedMagic'; Vid = '3537'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
     # 双飞燕 A4Tech / 血手幽灵
     @{ Brand = 'A4Tech';   Vid = '09DA'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
 )
@@ -836,19 +850,25 @@ function Find-UsbPreset {
             $parts = $row -split '\|'
             if ($parts.Count -lt 9) { continue }
             $vid = $parts[0]; $pid = $parts[1]; $upage = $parts[2]
+            $upageInt = 0
+            try { $upageInt = [Convert]::ToInt32($upage, 16) } catch { }
+            # 只在厂商私有通道 (>= 0xFF00) 中比对，绝不误碰标准鼠标键盘接口
+            if ($upageInt -lt 0xFF00) { continue }
 
             foreach ($p in $script:UsbPresets) {
-                if ($p.Vid.ToUpperInvariant() -eq $vid.ToUpperInvariant() -and
-                    ($p.UsagePage.ToUpperInvariant() -eq $upage.ToUpperInvariant() -or -not $p.UsagePage)) {
-                    return @{
-                        Brand       = $p.Brand
-                        Vid         = $vid
-                        Pid         = $pid
-                        UsagePage   = $upage
-                        FrameType   = $p.FrameType
-                        LevelIdx    = $p.LevelIdx
-                        LinkIdx     = $p.LinkIdx
-                        ProductName = $parts[7]
+                if ($p.Vid.ToUpperInvariant() -eq $vid.ToUpperInvariant()) {
+                    # 优先精确匹配 UsagePage；若未指定或相等则命中
+                    if (-not $p.UsagePage -or $p.UsagePage.ToUpperInvariant() -eq $upage.ToUpperInvariant()) {
+                        return @{
+                            Brand       = $p.Brand
+                            Vid         = $vid
+                            Pid         = $pid
+                            UsagePage   = $upage
+                            FrameType   = $p.FrameType
+                            LevelIdx    = $p.LevelIdx
+                            LinkIdx     = $p.LinkIdx
+                            ProductName = $parts[7]
+                        }
                     }
                 }
             }
