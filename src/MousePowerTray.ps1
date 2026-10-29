@@ -220,7 +220,7 @@ $script:ProbeBlock = {
     param($cfg)
     $ProgressPreference = 'SilentlyContinue'
     $ErrorActionPreference = 'Stop'
-    $out = @{ Ok = $false; Error = ''; Devices = @(); BleCount = 0 }
+    $out = @{ Ok = $false; Error = ''; Devices = @(); BleCount = 0; Skipped = @() }
 
     function Read-Node([string]$id, $key, [string]$fallback) {
         $props = @{}
@@ -258,12 +258,21 @@ $script:ProbeBlock = {
                            Where-Object { $_.InstanceId -like 'HID\*' } |
                            ForEach-Object { $_.InstanceId }) -join '|').ToUpperInvariant()
             $list = New-Object System.Collections.ArrayList
+            $skipped = New-Object System.Collections.ArrayList
             foreach ($n in $nodes) {
+                $nm = ([string]$n.FriendlyName).Trim()
                 $dev = $null
                 try { $dev = Read-Node $n.InstanceId $cfg.DevKey $n.FriendlyName } catch { }
-                if (-not $dev) { continue }
+                if (-not $dev) {
+                    # 有 BLE 节点却没有电量属性 = 设备没实现标准电池服务
+                    [void]$skipped.Add($(if ($nm) { $nm } else { '（未命名 BLE 设备）' }))
+                    continue
+                }
                 if ($cfg.NameFilter) {
-                    if ($dev.Name -notmatch $cfg.NameFilter) { continue }
+                    if ($dev.Name -notmatch $cfg.NameFilter) {
+                        [void]$skipped.Add($dev.Name + '（被名字过滤排除）')
+                        continue
+                    }
                 }
                 if ($dev.Mac) {
                     $dev.Online = $hidIndex.Contains($dev.Mac.ToUpperInvariant())
@@ -271,6 +280,7 @@ $script:ProbeBlock = {
                 [void]$list.Add($dev)
             }
             $out.Devices = @($list | Sort-Object @{ Expression = 'Online'; Descending = $true }, @{ Expression = 'Level'; Descending = $true })
+            $out.Skipped = @($skipped)
             $out.Ok = $true
         }
         elseif ($cfg.Id) {
@@ -759,6 +769,8 @@ $script:State = @{
     Updated = $null; Name = ''; Mac = ''; Id = ''; Error = ''
     LastSeen = $null; LastGoodUpdate = $null
     Devices = @()
+    # 扫描时"看到了但读不到电量"的设备，用于在选择框里解释为什么没列出来
+    Skipped = @(); BleCount = 0
 }
 # 2.4G 接收器状态（独立于 BLE）
 $script:UsbWorker = $false
@@ -836,7 +848,9 @@ function Apply-ProbeResult {
     if ($script:WorkerScan) {
         $devs = @($res.Devices | Where-Object { $_ })
         $script:State.Devices = $devs
-        Write-Log ('SCAN ok={0} ble={1} usable={2} -> {3}' -f $res.Ok, $res.BleCount, $devs.Count,
+        $script:State.Skipped = @($res.Skipped)
+        $script:State.BleCount = [int]$res.BleCount
+        Write-Log ('SCAN ok={0} ble={1} usable={2} skipped={3} -> {4}' -f $res.Ok, $res.BleCount, $devs.Count, @($res.Skipped).Count,
             (($devs | ForEach-Object { "$($_.Name)=$($_.Level)%/online=$($_.Online)" }) -join ', '))
 
         if ($script:PickerPending) {
@@ -1016,8 +1030,26 @@ function Update-Tray {
 }
 
 # ------------------------------------------------------------ 选择设备 ----
+function Start-DiagnoseProcess {
+    # 起独立进程跑诊断：抓包要几十秒，不能占着托盘的消息循环
+    $ps1 = Join-Path $script:Root 'MousePowerTray.ps1'
+    try {
+        Start-Process -FilePath 'powershell.exe' -ArgumentList @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $ps1 + '"'),
+            '-Diagnose', '-Capture', '-CaptureSeconds', '30')
+        Write-Log 'DIAGNOSE launched'
+        return $true
+    }
+    catch {
+        Write-Log ('DIAGNOSE-LAUNCH-ERR ' + $_.Exception.Message)
+        return $false
+    }
+}
+
 function Show-Picker {
     $devs = @($script:State.Devices)
+    $skipList = @($script:State.Skipped)
+    $empty = ($devs.Count -eq 0)
 
     $f = New-Object System.Windows.Forms.Form
     $f.Text = '选择要显示电量的设备'
@@ -1025,11 +1057,11 @@ function Show-Picker {
     $f.MaximizeBox = $false
     $f.MinimizeBox = $false
     $f.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
-    $f.ClientSize = New-Object System.Drawing.Size(420, 232)
+    $f.ClientSize = New-Object System.Drawing.Size(440, 274)
     $f.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
 
     $lb = New-Object System.Windows.Forms.ListBox
-    $lb.SetBounds(14, 14, 392, 150)
+    $lb.SetBounds(14, 14, 412, 142)
     $lb.IntegralHeight = $false
     foreach ($d in $devs) {
         $state = if ($d.Online) { '已连接' } else { '未连接' }
@@ -1039,30 +1071,55 @@ function Show-Picker {
     if ($lb.Items.Count -gt 0) { $lb.SelectedIndex = 0 }
 
     $tip = New-Object System.Windows.Forms.Label
-    if ($devs.Count -eq 0) {
-        $tip.Text = '没有找到能读电量蓝牙设备。' + "`r`n" + '请确认设备已通过蓝牙连接（不是 2.4G 接收器），然后点“重新扫描”。'
+    if ($empty) {
+        # 空列表最需要解释：是"没有 BLE 设备"还是"有设备但读不到电量"，
+        # 这两种情况的处理方式完全不同。
+        if ($script:State.BleCount -eq 0) {
+            $tip.Text = '没有检测到任何蓝牙 LE 设备。' + "`r`n" +
+                        '鼠标可能走 2.4G 接收器，或是经典蓝牙 —— 这两类都不会出现在这里。'
+        }
+        elseif ($skipList.Count -gt 0) {
+            $tip.Text = ('找到 {0} 台蓝牙 LE 设备，但都读不到电量：' -f $script:State.BleCount) + "`r`n" +
+                        '  ' + ($skipList -join '、') + "`r`n" +
+                        '它们没有暴露标准电池服务（0x180F），系统里就没有电量可读。'
+        }
+        else {
+            $tip.Text = '没有找到能读电量的蓝牙设备。' + "`r`n" + '请确认设备已通过蓝牙连接，然后点“重新扫描”。'
+        }
         $tip.ForeColor = [System.Drawing.Color]::FromArgb(160, 60, 50)
     }
     else {
         $tip.Text = '选择后会自动记住，下次直接显示。'
+        if ($skipList.Count -gt 0) {
+            $tip.Text += ('  另有 {0} 台读不到电量（没暴露电池服务）。' -f $skipList.Count)
+        }
         $tip.ForeColor = [System.Drawing.Color]::Gray
     }
-    $tip.SetBounds(14, 168, 392, 34)
+    $tip.SetBounds(14, 160, 412, 62)
 
     $btnOk = New-Object System.Windows.Forms.Button
-    $btnOk.Text = '确定'
-    $btnOk.SetBounds(222, 200, 88, 26)
-    $btnOk.Enabled = ($devs.Count -gt 0)
+    $btnOk.Text = $(if ($empty) { '收集诊断信息' } else { '确定' })
+    $btnOk.SetBounds(242, 234, 100, 26)
 
     $btnScan = New-Object System.Windows.Forms.Button
     $btnScan.Text = '重新扫描'
-    $btnScan.SetBounds(126, 200, 88, 26)
+    $btnScan.SetBounds(134, 234, 100, 26)
 
     $btnCancel = New-Object System.Windows.Forms.Button
-    $btnCancel.Text = '取消'
-    $btnCancel.SetBounds(318, 200, 88, 26)
+    $btnCancel.Text = '关闭'
+    $btnCancel.SetBounds(350, 234, 76, 26)
 
     $btnOk.Add_Click({
+        if ($empty) {
+            # 列表空着时这个按钮就是"收集诊断信息"，一键把问题变成可分析的报告
+            $f.Close()
+            if (-not (Start-DiagnoseProcess)) {
+                [void][System.Windows.Forms.MessageBox]::Show(
+                    ('诊断进程启动失败。可以手动运行：' + "`r`n" + (Join-Path $script:Root 'MousePowerTray.ps1') + ' -Diagnose'),
+                    '收集诊断信息', 'OK', 'Warning')
+            }
+            return
+        }
         $i = $lb.SelectedIndex
         if ($i -ge 0 -and $i -lt $devs.Count) {
             $d = $devs[$i]
@@ -1812,18 +1869,9 @@ $miDiag.Add_Click({
         [System.Windows.Forms.MessageBoxButtons]::OKCancel,
         [System.Windows.Forms.MessageBoxIcon]::Information)
     if ($r -ne 'OK') { return }
-    # 起独立进程跑，避免抓包时托盘界面卡住
-    $ps1 = Join-Path $script:Root 'MousePowerTray.ps1'
-    try {
-        Start-Process -FilePath 'powershell.exe' -ArgumentList @(
-            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $ps1 + '"'),
-            '-Diagnose', '-Capture', '-CaptureSeconds', '30')
-        Write-Log 'DIAGNOSE launched from tray'
-    }
-    catch {
-        Write-Log ('DIAGNOSE-LAUNCH-ERR ' + $_.Exception.Message)
+    if (-not (Start-DiagnoseProcess)) {
         [void][System.Windows.Forms.MessageBox]::Show(
-            "启动失败：$($_.Exception.Message)`n`n可以手动运行：`n$ps1 -Diagnose",
+            ('启动失败。可以手动运行：' + "`r`n" + (Join-Path $script:Root 'MousePowerTray.ps1') + ' -Diagnose'),
             '收集诊断信息', 'OK', 'Warning')
     }
 })
