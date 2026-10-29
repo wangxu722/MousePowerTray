@@ -2497,8 +2497,13 @@ $timer.Add_Tick({
     }
     elseif ($script:PendingRefresh) { $script:PendingRefresh = $false; Start-Probe }
     elseif ($script:VerifyAt -and (Get-Date) -ge $script:VerifyAt) { $script:VerifyAt = $null; Start-Probe }
-    elseif (((Get-Date) - $script:WorkerStart).TotalMilliseconds -ge ($script:Cfg.RefreshSeconds * 1000)) {
-        Start-Probe
+    else {
+        # 绿色节能机制：若 2.4G 处于活跃连接态，自动延长蓝牙探测周期至 60 秒，减少无谓的 Get-PnpDevice 开销
+        $usbActive = $script:UsbWorker -and $script:Usb.Online -and (-not $script:Usb.Idle)
+        $intervalSec = if ($usbActive) { [math]::Max(60, $script:Cfg.RefreshSeconds) } else { $script:Cfg.RefreshSeconds }
+        if (((Get-Date) - $script:WorkerStart).TotalMilliseconds -ge ($intervalSec * 1000)) {
+            Start-Probe
+        }
     }
     if ($script:Popup -and $script:Popup.Visible -and (Get-Date) -gt $script:PopupUntil) {
         $script:Popup.Hide()
