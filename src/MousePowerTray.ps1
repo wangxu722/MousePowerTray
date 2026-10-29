@@ -1365,6 +1365,37 @@ function Apply-ProbeResult {
     Update-Tray
 }
 
+# 统一解析 2.4G 设备的友好显示名称（坚决屏蔽底层固件报上来的 "wireless receiver" 泛称）
+function Get-UsbDeviceDisplayName {
+    param($Preset, $BleName)
+    $rawProd = if ($Preset -and $Preset.ProductName) { $Preset.ProductName } else { '' }
+    $isGeneric = ($rawProd -match '(?i)^(wireless|usb|2\.4g)?[ _-]*(receiver|dongle|adapter)$' -or [string]::IsNullOrWhiteSpace($rawProd))
+    $brand = if ($Preset -and $Preset.Brand) { $Preset.Brand } else { '' }
+    $brandCn = switch ($brand) {
+        'AULA' { '狼蛛 (AULA)' }
+        'Inphic' { '英菲克 (Inphic)' }
+        'Xiaomi' { '小米 (Xiaomi)' }
+        'A4Tech' { '双飞燕 (A4Tech)' }
+        'Logitech' { '罗技 (Logitech)' }
+        default { if ($brand -and $brand -notmatch 'Generic') { $brand } else { '2.4G' } }
+    }
+
+    # 如果有明确的具体型号名（例如用户配对过的 AULA-SC580）
+    if ($BleName -and $BleName -ne $script:AppName) {
+        return ($BleName)
+    }
+    if ($script:Cfg.DeviceName -and -not $script:Cfg.DeviceId -and $script:Cfg.DeviceName -notmatch '(?i)receiver|dongle') {
+        return $script:Cfg.DeviceName
+    }
+    if (-not $isGeneric) {
+        return $rawProd
+    }
+    if ($brandCn -and $brandCn -ne '2.4G') {
+        return ($brandCn + ' 无线鼠标')
+    }
+    return '2.4G 无线鼠标'
+}
+
 # 统一决定「现在该显示谁」——托盘和浮层都走这里，避免两处逻辑跑偏
 # 优先级：蓝牙在线 > 2.4G 活跃有数据 > 蓝牙离线记忆 > 2.4G 待机/离线
 function Get-DisplayState {
@@ -1374,24 +1405,7 @@ function Get-DisplayState {
     $usbReady = $script:UsbWorker -and $script:Usb.HasData -and ($script:Usb.Level -ge 0)
     $nmBle = if ($s.Name) { $s.Name } else { $script:AppName }
 
-    # 智能名称过滤：坚决规避 'wireless receiver' / 'dongle' 等硬件底层泛称
-    $rawProd = if ($script:ActivePreset) { $script:ActivePreset.ProductName } else { '' }
-    $isGeneric = ($rawProd -match '(?i)^(wireless|usb|2\.4g)?[ _-]*(receiver|dongle|adapter)$' -or -not $rawProd)
-    $brand = if ($script:ActivePreset -and $script:ActivePreset.Brand) { $script:ActivePreset.Brand } else { '' }
-    $brandCn = switch ($brand) {
-        'AULA' { '狼蛛 (AULA)' }
-        'Inphic' { '英菲克 (Inphic)' }
-        'Xiaomi' { '小米 (Xiaomi)' }
-        'A4Tech' { '双飞燕 (A4Tech)' }
-        'Logitech' { '罗技 (Logitech)' }
-        default { $brand }
-    }
-
-    $nmUsb = if (-not $isGeneric) { $rawProd }
-             elseif ($s.Name -and $s.Name -ne $script:AppName) { $s.Name }
-             elseif ($script:Cfg.DeviceName -and -not $script:Cfg.DeviceId) { $script:Cfg.DeviceName }
-             elseif ($brandCn) { $brandCn + ' 鼠标' }
-             else { '2.4G 无线鼠标' }
+    $nmUsb = Get-UsbDeviceDisplayName -Preset $script:ActivePreset -BleName $s.Name
 
     # 1. 蓝牙在线拥有第一优先级：鼠标物理拨到蓝牙模式时立即展示蓝牙，绝不被闲置插着的 2.4G 接收器遮蔽
     if ($bleOnline) {
@@ -1511,10 +1525,14 @@ function Show-Picker {
     $devs = @($script:State.Devices)
     $usbPreset = Find-UsbPreset
     if ($usbPreset) {
-        $usbItemName = if ($usbPreset.ProductName) { $usbPreset.ProductName } else { $usbPreset.Brand + ' 2.4G 接收器' }
+        $bleNameCandidate = ''
+        if ($devs.Count -gt 0 -and $devs[0].Name) { $bleNameCandidate = $devs[0].Name }
+        elseif ($script:State.Name) { $bleNameCandidate = $script:State.Name }
+        $usbFriendlyName = Get-UsbDeviceDisplayName -Preset $usbPreset -BleName $bleNameCandidate
         $usbDev = @{
             IsUsb = $true
-            Name = ('[2.4G] ' + $usbItemName)
+            Name = ('[2.4G] ' + $usbFriendlyName)
+            FriendlyName = $usbFriendlyName
             Level = if ($script:Usb.Level -ge 0) { $script:Usb.Level } else { -1 }
             Online = [bool]$script:Usb.Online
             Preset = $usbPreset
@@ -1599,7 +1617,7 @@ function Show-Picker {
             $d = $devs[$i]
             if ($d.IsUsb) {
                 $script:Cfg.DeviceId = ''
-                $script:Cfg.DeviceName = $d.Preset.ProductName
+                $script:Cfg.DeviceName = if ($d.FriendlyName) { $d.FriendlyName } else { (Get-UsbDeviceDisplayName -Preset $d.Preset -BleName '') }
                 $script:Cfg.UsbVid = $d.Preset.Vid
                 $script:Cfg.UsbPid = $d.Preset.Pid
                 $script:Cfg.UsbUsagePage = $d.Preset.UsagePage
