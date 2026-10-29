@@ -484,6 +484,7 @@ public static class HidBat
     }
 
     public static bool IsRunning { get { return running; } }
+    public static int InputReportLength = 33;
 
     public static string Find(int upage, int vid, int pid)
     {
@@ -517,7 +518,8 @@ public static class HidBat
                         var attr = new HIDD_ATTRIBUTES();
                         attr.Size = Marshal.SizeOf(typeof(HIDD_ATTRIBUTES));
                         if (!HidD_GetAttributes(h, ref attr)) continue;
-                        if (vid > 0 && (attr.VendorID != vid || attr.ProductID != pid)) continue;
+                        if (vid > 0 && attr.VendorID != vid) continue;
+                        if (pid > 0 && attr.ProductID != pid) continue;
                         IntPtr pp;
                         if (!HidD_GetPreparsedData(h, out pp) || pp == IntPtr.Zero) continue;
                         try
@@ -526,6 +528,9 @@ public static class HidBat
                             if (HidP_GetCaps(pp, caps) != 0x00110000) continue;
                             int up = BitConverter.ToUInt16(caps, 2);
                             if (up != upage) continue;
+                            int inLen = BitConverter.ToUInt16(caps, 4);
+                            if (inLen <= 0) continue;
+                            InputReportLength = inLen;
                             found = path;
                         }
                         finally { HidD_FreePreparsedData(pp); }
@@ -596,8 +601,8 @@ public static class HidBat
         }
         if (h == INVALID) { Error = "open-failed " + Marshal.GetLastWin32Error(); running = false; return; }
 
-        int len = isLogitechMode ? 64 : 33;
-        var buf = new byte[128];
+        int len = InputReportLength > 0 ? InputReportLength : (isLogitechMode ? 64 : 33);
+        var buf = new byte[Math.Max(128, len)];
         try
         {
             if (isLogitechMode)
@@ -863,6 +868,11 @@ $script:UsbPresets = @(
     # 罗技 Logitech 全系 (Lightspeed / Unifying / Bolt)
     @{ Brand = 'Logitech'; Vid = '046D'; UsagePage = 'FF00'; FrameType = 'HIDPP'; LevelIdx = -1; LinkIdx = -1 }
     @{ Brand = 'Logitech'; Vid = '046D'; UsagePage = 'FF43'; FrameType = 'HIDPP'; LevelIdx = -1; LinkIdx = -1 }
+    # 小米 Xiaomi (无线键鼠套装 3 / 双模无线鼠标 / 便携鼠标 / Lite 等)
+    @{ Brand = 'Xiaomi';   Vid = '2717'; UsagePage = 'FFEF'; FrameType = '';      LevelIdx = -1; LinkIdx = -1 }
+    @{ Brand = 'Xiaomi';   Vid = '2717'; UsagePage = 'FF01'; FrameType = '';      LevelIdx = -1; LinkIdx = -1 }
+    @{ Brand = 'Xiaomi';   Vid = '2717'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
+    @{ Brand = 'Xiaomi';   Vid = '2717'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = -1; LinkIdx = -1 }
     # 狼蛛 AULA (SC580 / F87 等)
     @{ Brand = 'AULA';     Vid = '089D'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
     # VGN / ATK (蜻蜓 F1 系列 / ATK A9 / 烈空等)
@@ -903,18 +913,21 @@ function Find-UsbPreset {
         $enumRows = [HidBat]::Enumerate()
         if (-not $enumRows -or $enumRows[0] -eq 'ENUM-FAILED') { return $null }
 
+        # 第一轮：优先匹配预设品牌库（要求具备 InLen > 0 可读端点）
         foreach ($row in $enumRows) {
             $parts = $row -split '\|'
             if ($parts.Count -lt 9) { continue }
             $vid = $parts[0]; $pid = $parts[1]; $upage = $parts[2]
+            $inLen = 0
+            try { $inLen = [int]$parts[4] } catch { }
+            if ($inLen -le 0) { continue }
+
             $upageInt = 0
             try { $upageInt = [Convert]::ToInt32($upage, 16) } catch { }
-            # 只在厂商私有通道 (>= 0xFF00) 中比对，绝不误碰标准鼠标键盘接口
             if ($upageInt -lt 0xFF00) { continue }
 
             foreach ($p in $script:UsbPresets) {
                 if ($p.Vid.ToUpperInvariant() -eq $vid.ToUpperInvariant()) {
-                    # 优先精确匹配 UsagePage；若未指定或相等则命中
                     if (-not $p.UsagePage -or $p.UsagePage.ToUpperInvariant() -eq $upage.ToUpperInvariant()) {
                         return @{
                             Brand       = $p.Brand
@@ -925,8 +938,36 @@ function Find-UsbPreset {
                             LevelIdx    = $p.LevelIdx
                             LinkIdx     = $p.LinkIdx
                             ProductName = $parts[7]
+                            InLen       = $inLen
                         }
                     }
+                }
+            }
+        }
+
+        # 第二轮：通用 2.4G 接收器自动识别（产品名含 Mouse/Combo/Wireless 且具备厂商私有通道）
+        foreach ($row in $enumRows) {
+            $parts = $row -split '\|'
+            if ($parts.Count -lt 9) { continue }
+            $vid = $parts[0]; $pid = $parts[1]; $upage = $parts[2]
+            $inLen = 0
+            try { $inLen = [int]$parts[4] } catch { }
+            if ($inLen -le 0) { continue }
+            $upageInt = 0
+            try { $upageInt = [Convert]::ToInt32($upage, 16) } catch { }
+            if ($upageInt -lt 0xFF00) { continue }
+            $prod = $parts[7]
+            if ($prod -match 'Mouse|Combo|Wireless|Keyboard') {
+                return @{
+                    Brand       = 'Generic USB'
+                    Vid         = $vid
+                    Pid         = $pid
+                    UsagePage   = $upage
+                    FrameType   = ''
+                    LevelIdx    = -1
+                    LinkIdx     = -1
+                    ProductName = $prod
+                    InLen       = $inLen
                 }
             }
         }
@@ -1031,30 +1072,56 @@ function Update-UsbState {
         }
 
         $hex, $ts = $f -split '\|'
-        if ($hex.Length -lt 8) { continue }
+        if ($hex.Length -lt 4) { continue }
         $b = @()
         for ($i = 0; $i -lt $hex.Length; $i += 2) { $b += [Convert]::ToByte($hex.Substring($i, 2), 16) }
-        if ($b.Count -lt 4) { continue }
-        if ($typeWant -ge 0 -and $b.Count -gt 1 -and $b[1] -ne $typeWant) {
-            if ($script:Cfg.Debug) { Write-Log ('USB-FRAME(ignored) ' + $hex) }
-            continue
+        if ($b.Count -lt 2) { continue }
+
+        # 始终记录收到的原始帧，方便诊断捕获与协议排查
+        Write-Log ('USB-FRAME len={0} raw={1}' -f $b.Count, $hex)
+
+        $lv = -1
+        $link = 1
+
+        if ($typeWant -ge 0 -and $b.Count -gt 1 -and $b[1] -eq $typeWant -and $lvIdx -ge 0 -and $lvIdx -lt $b.Count) {
+            # 命中标准厂商帧类型（如 00 D1 ...）
+            $cand = [int]$b[$lvIdx]
+            if ($cand -ge 0 -and $cand -le 100) { $lv = $cand }
+            if ($lkIdx -ge 0 -and $lkIdx -lt $b.Count) { $link = [int]$b[$lkIdx] }
         }
-        if ($lvIdx -lt 0 -or $lvIdx -ge $b.Count) { continue }
-        $lv = [int]$b[$lvIdx]
-        if ($lv -lt 0 -or $lv -gt 100) { continue }
-        $link = if ($lkIdx -ge 0 -and $lkIdx -lt $b.Count) { [int]$b[$lkIdx] } else { 1 }
-        if (-not $script:Usb.HasData -or $script:Usb.Level -ne $lv) { $changed = $true }
-        $script:Usb.HasData = $true
-        $script:Usb.Level = $lv
-        $script:Usb.At = Get-Date
-        # 收到任何有效帧就说明设备活着；链路位为 0 只是待机，不当作断连
+        elseif ($lvIdx -ge 0 -and $lvIdx -lt $b.Count) {
+            # 命中指定索引
+            $cand = [int]$b[$lvIdx]
+            if ($cand -ge 0 -and $cand -le 100) { $lv = $cand }
+            if ($lkIdx -ge 0 -and $lkIdx -lt $b.Count) { $link = [int]$b[$lkIdx] }
+        }
+        else {
+            # 自适应嗅探：在非首字节中寻找合法电量候选（1..100）
+            for ($idx = 1; $idx -lt [math]::Min(8, $b.Count); $idx++) {
+                $val = [int]$b[$idx]
+                if ($val -ge 1 -and $val -le 100) {
+                    if ($lv -lt 0 -or ($val -gt 5 -and $lv -le 5)) {
+                        $lv = $val
+                    }
+                }
+            }
+            if ($lv -ge 0) {
+                Write-Log ('USB-SNIFF-LEVEL level={0}%' -f $lv)
+            }
+        }
+
+        # 只要接收器有有效帧上报，即表明设备活跃连接
         if (-not $script:Usb.Online) { $changed = $true }
         $script:Usb.Online = $true
         $script:Usb.Idle = ($link -eq 0)
-        if ($script:Cfg.Debug) {
-            Write-Log ('USB-FRAME level={0} link={1} raw={2}' -f $lv, $link, $hex)
+        $script:Usb.At = Get-Date
+
+        if ($lv -ge 0) {
+            if (-not $script:Usb.HasData -or $script:Usb.Level -ne $lv) { $changed = $true }
+            $script:Usb.HasData = $true
+            $script:Usb.Level = $lv
+            if ($script:Cfg.LastUsbLevel -ne $lv) { $script:Cfg.LastUsbLevel = $lv; Save-Config }
         }
-        if ($script:Cfg.LastUsbLevel -ne $lv) { $script:Cfg.LastUsbLevel = $lv; Save-Config }
     }
 
     # 2.4G 离线判定：放宽至 1800 秒（30分钟）。
@@ -1394,6 +1461,19 @@ function Start-DiagnoseProcess {
 
 function Show-Picker {
     $devs = @($script:State.Devices)
+    $usbPreset = Find-UsbPreset
+    if ($usbPreset) {
+        $usbItemName = if ($usbPreset.ProductName) { $usbPreset.ProductName } else { $usbPreset.Brand + ' 2.4G 接收器' }
+        $usbDev = @{
+            IsUsb = $true
+            Name = ('[2.4G] ' + $usbItemName)
+            Level = if ($script:Usb.Level -ge 0) { $script:Usb.Level } else { -1 }
+            Online = [bool]$script:Usb.Online
+            Preset = $usbPreset
+            Id = ('USB:' + $usbPreset.Vid + ':' + $usbPreset.Pid)
+        }
+        $devs = @($usbDev) + @($devs)
+    }
     $skipList = @($script:State.Skipped)
     $empty = ($devs.Count -eq 0)
 
@@ -1469,21 +1549,38 @@ function Show-Picker {
         $i = $lb.SelectedIndex
         if ($i -ge 0 -and $i -lt $devs.Count) {
             $d = $devs[$i]
-            $script:Cfg.DeviceId = $d.Id
-            $script:Cfg.DeviceName = $d.Name
-            Save-Config
-            Write-Log ('PICK ' + $d.Id)
-            $script:State.Mode = 'ble'
-            $script:State.Name = $d.Name
-            $script:State.Id = $d.Id
-            $script:State.Mac = $d.Mac
-            $script:State.Level = [int]$d.Level
-            $script:State.LastLevel = [int]$d.Level
-            $script:State.Online = [bool]$d.Online
-            $script:State.Connected = [bool]$d.Online
-            $script:State.LastGoodUpdate = $d.Updated
-            $script:LastPainted = ''
-            Update-Tray
+            if ($d.IsUsb) {
+                $script:Cfg.DeviceId = ''
+                $script:Cfg.DeviceName = $d.Preset.ProductName
+                $script:Cfg.UsbVid = $d.Preset.Vid
+                $script:Cfg.UsbPid = $d.Preset.Pid
+                $script:Cfg.UsbUsagePage = $d.Preset.UsagePage
+                $script:Cfg.UsbFrameType = $d.Preset.FrameType
+                $script:Cfg.UsbLevelIndex = $d.Preset.LevelIdx
+                $script:Cfg.UsbLinkIndex = $d.Preset.LinkIdx
+                Save-Config
+                Write-Log ('PICK-USB ' + $d.Preset.Brand + ' ' + $d.Preset.Vid + ':' + $d.Preset.Pid + ' upage=0x' + $d.Preset.UsagePage)
+                Start-UsbListener
+                Update-Tray
+            }
+            else {
+                $script:Cfg.DeviceId = $d.Id
+                $script:Cfg.DeviceName = $d.Name
+                $script:Cfg.UsbUsagePage = ''
+                Save-Config
+                Write-Log ('PICK ' + $d.Id)
+                $script:State.Mode = 'ble'
+                $script:State.Name = $d.Name
+                $script:State.Id = $d.Id
+                $script:State.Mac = $d.Mac
+                $script:State.Level = [int]$d.Level
+                $script:State.LastLevel = [int]$d.Level
+                $script:State.Online = [bool]$d.Online
+                $script:State.Connected = [bool]$d.Online
+                $script:State.LastGoodUpdate = $d.Updated
+                $script:LastPainted = ''
+                Update-Tray
+            }
         }
         $f.Close()
     })
