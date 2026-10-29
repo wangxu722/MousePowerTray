@@ -1365,34 +1365,73 @@ function Apply-ProbeResult {
     Update-Tray
 }
 
-# 统一解析 2.4G 设备的友好显示名称（坚决屏蔽底层固件报上来的 "wireless receiver" 泛称）
+# 统一解析 2.4G 设备的友好显示名称（全系主流品牌覆盖 + 严格防串名）
 function Get-UsbDeviceDisplayName {
     param($Preset, $BleName)
-    $rawProd = if ($Preset -and $Preset.ProductName) { $Preset.ProductName } else { '' }
+    $rawProd = if ($Preset -and $Preset.ProductName) { $Preset.ProductName.Trim() } else { '' }
     $isGeneric = ($rawProd -match '(?i)^(wireless|usb|2\.4g)?[ _-]*(receiver|dongle|adapter)$' -or [string]::IsNullOrWhiteSpace($rawProd))
     $brand = if ($Preset -and $Preset.Brand) { $Preset.Brand } else { '' }
-    $brandCn = switch ($brand) {
-        'AULA' { '狼蛛 (AULA)' }
-        'Inphic' { '英菲克 (Inphic)' }
-        'Xiaomi' { '小米 (Xiaomi)' }
-        'A4Tech' { '双飞燕 (A4Tech)' }
-        'Logitech' { '罗技 (Logitech)' }
-        default { if ($brand -and $brand -notmatch 'Generic') { $brand } else { '2.4G' } }
+
+    # 全系主流品牌映射表
+    $brandMap = @{
+        'Logitech'    = '罗技 (Logitech)'
+        'Xiaomi'      = '小米 (Xiaomi)'
+        'AULA'        = '狼蛛 (AULA)'
+        'VGN/ATK'     = 'VGN/ATK (蜻蜓)'
+        'DAREU'       = '达尔优 (DAREU)'
+        'Rapoo'       = '雷柏 (Rapoo)'
+        'MCHOSE'      = '迈从 (MCHOSE)'
+        'Inphic'      = '英菲克 (Inphic)'
+        'HECATE'      = '漫步者 (HECATE)'
+        'DeLUX'       = '多彩 (DeLUX)'
+        'AJAZZ'       = '黑爵 (AJAZZ)'
+        'RedMagic'    = '红魔 (RedMagic)'
+        'A4Tech'      = '双飞燕 (A4Tech)'
+        'Razer'       = '雷蛇 (Razer)'
+        'SteelSeries' = '赛睿 (SteelSeries)'
+        'ASUS'        = '华硕 (ROG)'
     }
 
-    # 如果有明确的具体型号名（例如用户配对过的 AULA-SC580）
-    if ($BleName -and $BleName -ne $script:AppName) {
-        return ($BleName)
+    $brandCn = if ($brand -and $brandMap.ContainsKey($brand)) { $brandMap[$brand] }
+               elseif ($brand -and $brand -notmatch '(?i)generic') { $brand }
+               else { '' }
+
+    # 1. 固件自带清晰型号（非 Generic / Receiver 泛称）优先采用
+    if (-not $isGeneric -and $rawProd -notmatch '(?i)^mouse$') {
+        return $rawProd
     }
+
+    # 2. 严格的品牌同源校验：只有当蓝牙广播名包含该接收器的品牌关键词时，才联动蓝牙具体型号（防止张冠李戴）
+    if ($BleName -and $BleName -ne $script:AppName) {
+        $brandPattern = switch ($brand) {
+            'AULA'     { 'AULA|狼蛛' }
+            'Xiaomi'   { 'Xiaomi|Mi|小米' }
+            'Inphic'   { 'Inphic|英菲克' }
+            'A4Tech'   { 'A4Tech|Bloody|Fstyler|双飞燕|血手|飞时代' }
+            'Logitech' { 'Logi|Logitech|罗技' }
+            'VGN/ATK'  { 'VGN|ATK|蜻蜓' }
+            'DAREU'    { 'DAREU|达尔优' }
+            'Rapoo'    { 'Rapoo|雷柏' }
+            'MCHOSE'   { 'MCHOSE|迈从' }
+            'HECATE'   { 'HECATE|漫步者' }
+            'AJAZZ'    { 'AJAZZ|黑爵' }
+            default    { '' }
+        }
+        if ($brandPattern -and $BleName -match "(?i)$brandPattern") {
+            return $BleName
+        }
+    }
+
+    # 3. 用户手动配置过的名称优先
     if ($script:Cfg.DeviceName -and -not $script:Cfg.DeviceId -and $script:Cfg.DeviceName -notmatch '(?i)receiver|dongle') {
         return $script:Cfg.DeviceName
     }
-    if (-not $isGeneric) {
-        return $rawProd
-    }
-    if ($brandCn -and $brandCn -ne '2.4G') {
+
+    # 4. 回退至品牌标准中文名
+    if ($brandCn) {
         return ($brandCn + ' 无线鼠标')
     }
+
     return '2.4G 无线鼠标'
 }
 
