@@ -1015,8 +1015,8 @@ function Start-UsbListener {
         }
         if ([HidBat]::Start($upage, $vid, $pid_)) {
             $script:UsbWorker = $true
-            # 接收器物理插着并成功开启监听，标记在线就绪，绝不默认为断开
-            $script:Usb.Online = $true
+            # 接收器成功开启后台监听；等待收到真实鼠标无线帧后再置 Online，避免启动时压制在线蓝牙
+            $script:Usb.Online = $false
             $script:Usb.At = Get-Date
             if ($script:Cfg.LastUsbLevel -ge 0) {
                 $script:Usb.Level = [int]$script:Cfg.LastUsbLevel
@@ -1127,11 +1127,23 @@ function Update-UsbState {
             }
         }
 
-        # 只要接收器有有效帧上报，即表明设备活跃连接
-        if (-not $script:Usb.Online) { $changed = $true }
-        $script:Usb.Online = $true
-        $script:Usb.Idle = ($link -eq 0)
+        $isIdle = ($link -eq 0)
+        $script:Usb.Idle = $isIdle
         $script:Usb.At = Get-Date
+
+        if ($isIdle) {
+            # 鼠标物理开关切走（至蓝牙或关机）时上报 link=0，立即释放 2.4G 在线态并唤醒蓝牙探测
+            if ($script:Usb.Online) {
+                $script:Usb.Online = $false
+                $changed = $true
+                $script:PendingRefresh = $true
+                Write-Log 'USB-LINK-IDLE mouse switched away or sleep, trigger BLE scan'
+            }
+        }
+        else {
+            if (-not $script:Usb.Online) { $changed = $true }
+            $script:Usb.Online = $true
+        }
 
         if ($lv -ge 0) {
             if (-not $script:Usb.HasData -or $script:Usb.Level -ne $lv) { $changed = $true }
@@ -1145,10 +1157,10 @@ function Update-UsbState {
     # 很多 2.4G 鼠标（如狼蛛 SC580）仅在电量跳变或开机唤醒时推帧，正常使用中电量长时间未降属于正常物理现象，
     # 只要 USB 接收器未被拔除且仍在监听，维持在线与最后电量，避免误判断开。
     if ($script:Usb.HasData -and $script:Usb.Online) {
-        if (((Get-Date) - $script:Usb.At).TotalSeconds -gt 1800) {
+        if (((Get-Date) - $script:Usb.At).TotalSeconds -gt 180) {
             $script:Usb.Online = $false
             $changed = $true
-            Write-Log 'USB-OFFLINE (no frame in 1800s)'
+            Write-Log 'USB-OFFLINE (no frame in 180s)'
         }
     }
 
@@ -1256,13 +1268,11 @@ function Apply-ProbeResult {
 
         if (-not $script:Cfg.DeviceId) {
             $pick = $null
-            # 如果系统当前插着 2.4G 接收器，不要自动绑定离线蓝牙设备
-            if (-not $script:UsbWorker) {
-                if ($devs.Count -eq 1 -and $devs[0].Online) { $pick = $devs[0] }
-                elseif ($devs.Count -gt 1) {
-                    $online = @($devs | Where-Object { $_.Online })
-                    if ($online.Count -eq 1) { $pick = $online[0] }
-                }
+            # 无论是否插着接收器，只要蓝牙有明确唯一在线设备，自动绑定该设备
+            if ($devs.Count -eq 1 -and $devs[0].Online) { $pick = $devs[0] }
+            elseif ($devs.Count -gt 1) {
+                $online = @($devs | Where-Object { $_.Online })
+                if ($online.Count -eq 1) { $pick = $online[0] }
             }
             if ($pick) {
                 $script:Cfg.DeviceId = $pick.Id
@@ -1356,33 +1366,56 @@ function Apply-ProbeResult {
 }
 
 # 统一决定「现在该显示谁」——托盘和浮层都走这里，避免两处逻辑跑偏
-# 优先级：蓝牙在线 > 2.4G 有数据 > 2.4G 接收器在但还没上报 > 蓝牙（离线态）
+# 优先级：蓝牙在线 > 2.4G 活跃有数据 > 蓝牙离线记忆 > 2.4G 待机/离线
 function Get-DisplayState {
     $s = $script:State
     $bleOnline = [bool]$s.Online
-    $usbOnline = $script:UsbWorker -and [bool]$script:Usb.Online
-    $usbReady = $script:UsbWorker -and $script:Usb.HasData
+    $usbOnline = $script:UsbWorker -and [bool]$script:Usb.Online -and (-not $script:Usb.Idle)
+    $usbReady = $script:UsbWorker -and $script:Usb.HasData -and ($script:Usb.Level -ge 0)
     $nmBle = if ($s.Name) { $s.Name } else { $script:AppName }
-    $presetName = if ($script:ActivePreset) { $script:ActivePreset.Brand + ' 鼠标' } else { '' }
-    $nmUsb = if ($script:ActivePreset -and $script:ActivePreset.ProductName) { $script:ActivePreset.ProductName }
-             elseif ($presetName) { $presetName }
+
+    # 智能名称过滤：坚决规避 'wireless receiver' / 'dongle' 等硬件底层泛称
+    $rawProd = if ($script:ActivePreset) { $script:ActivePreset.ProductName } else { '' }
+    $isGeneric = ($rawProd -match '(?i)^(wireless|usb|2\.4g)?[ _-]*(receiver|dongle|adapter)$' -or -not $rawProd)
+    $brand = if ($script:ActivePreset -and $script:ActivePreset.Brand) { $script:ActivePreset.Brand } else { '' }
+    $brandCn = switch ($brand) {
+        'AULA' { '狼蛛 (AULA)' }
+        'Inphic' { '英菲克 (Inphic)' }
+        'Xiaomi' { '小米 (Xiaomi)' }
+        'A4Tech' { '双飞燕 (A4Tech)' }
+        'Logitech' { '罗技 (Logitech)' }
+        default { $brand }
+    }
+
+    $nmUsb = if (-not $isGeneric) { $rawProd }
+             elseif ($s.Name -and $s.Name -ne $script:AppName) { $s.Name }
              elseif ($script:Cfg.DeviceName -and -not $script:Cfg.DeviceId) { $script:Cfg.DeviceName }
+             elseif ($brandCn) { $brandCn + ' 鼠标' }
              else { '2.4G 无线鼠标' }
 
-    # 1. 优先展示真正处于活跃连接的设备
-    if ($usbOnline) {
+    # 1. 蓝牙在线拥有第一优先级：鼠标物理拨到蓝牙模式时立即展示蓝牙，绝不被闲置插着的 2.4G 接收器遮蔽
+    if ($bleOnline) {
+        return @{ Mode = 'ble'; Online = $true; Level = $s.Level; LastLevel = $s.LastLevel
+                  Name = $nmBle; Idle = $false; At = $s.LastGoodUpdate }
+    }
+
+    # 2. 2.4G 处于活跃连接态（接收器插入、收到有效帧且未收到断开链路帧）
+    if ($usbOnline -and $usbReady) {
         $lv = if ($script:Usb.HasData) { $script:Usb.Level }
               elseif ($script:Cfg.LastUsbLevel -ge 0) { [int]$script:Cfg.LastUsbLevel }
               else { -1 }
         return @{ Mode = 'usb'; Online = $true; Level = $lv
                   LastLevel = $lv; Name = $nmUsb; Idle = [bool]$script:Usb.Idle; At = $script:Usb.At }
     }
-    if ($bleOnline) {
-        return @{ Mode = 'ble'; Online = $true; Level = $s.Level; LastLevel = $s.LastLevel
+
+    # 3. 蓝牙曾连接但当前离线，若 2.4G 也没有活跃数据，优先保留历史蓝牙状态
+    $hasBleLast = ($s.LastLevel -ge 0)
+    if ($hasBleLast -and (-not $usbReady)) {
+        return @{ Mode = 'ble'; Online = $false; Level = $s.LastLevel; LastLevel = $s.LastLevel
                   Name = $nmBle; Idle = $false; At = $s.LastGoodUpdate }
     }
 
-    # 2. 接收器插着但处于离线状态
+    # 4. 2.4G 接收器插着（处于待机、休眠或离线态）
     if ($script:UsbWorker) {
         $lv = if ($script:Usb.HasData) { $script:Usb.Level }
               elseif ($script:Cfg.LastUsbLevel -ge 0) { [int]$script:Cfg.LastUsbLevel }
@@ -1391,8 +1424,6 @@ function Get-DisplayState {
                   Name = $nmUsb; Idle = [bool]$script:Usb.Idle; At = $script:Usb.At }
     }
 
-    # 3. 只有当 2.4G 接收器完全拔掉时，才回退显示蓝牙离线历史记录
-    $hasBleLast = ($s.LastLevel -ge 0)
     if ($hasBleLast) {
         return @{ Mode = 'ble'; Online = $false; Level = $s.LastLevel; LastLevel = $s.LastLevel
                   Name = $nmBle; Idle = $false; At = $s.LastGoodUpdate }
