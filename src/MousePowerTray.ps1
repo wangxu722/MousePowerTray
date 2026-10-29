@@ -1150,6 +1150,10 @@ function Update-UsbState {
             $script:Usb.HasData = $true
             $script:Usb.Level = $lv
             if ($script:Cfg.LastUsbLevel -ne $lv) { $script:Cfg.LastUsbLevel = $lv; Save-Config }
+            # 若 2.4G 正在收到电量，而蓝牙此前处于在线，说明刚从蓝牙切过来，立刻触发核验加速切换
+            if ($script:State.Online -and -not $script:PendingRefresh) {
+                $script:PendingRefresh = $true
+            }
         }
     }
 
@@ -1315,9 +1319,10 @@ function Apply-ProbeResult {
         if ($script:Cfg.Debug) {
             Write-Log ('POLL {0} {1}% online={2}' -f $dev.Name, $dev.Level, $dev.Online)
         }
-        # 从在线翻成离线时补验一次，避免一次瞬时抖动就把图标判灰
+        # 从在线翻成离线时：若 2.4G 已经活跃，说明是物理切走，无需 3 秒防抖；纯蓝牙时才延时防抖
         if ($script:State.Online -and -not $dev.Online) {
-            if (-not $script:PendingOffline) {
+            $usbActive = $script:UsbWorker -and $script:Usb.Online -and (-not $script:Usb.Idle)
+            if (-not $usbActive -and -not $script:PendingOffline) {
                 $script:PendingOffline = $true
                 $script:VerifyAt = (Get-Date).AddSeconds(3)
                 Write-Log 'STATE online -> offline (defer verify in 3s)'
@@ -1326,6 +1331,7 @@ function Apply-ProbeResult {
             else {
                 $script:PendingOffline = $false
                 $script:VerifyAt = $null
+                if ($usbActive) { Write-Log 'STATE online -> offline (2.4G active, bypass 3s delay)' }
             }
         }
         else {
@@ -1446,13 +1452,23 @@ function Get-DisplayState {
 
     $nmUsb = Get-UsbDeviceDisplayName -Preset $script:ActivePreset -BleName $s.Name
 
-    # 1. 蓝牙在线拥有第一优先级：鼠标物理拨到蓝牙模式时立即展示蓝牙，绝不被闲置插着的 2.4G 接收器遮蔽
+    # 1. 双模实时仲裁：若 2.4G 在最近 3 秒内收到真实无线数据，说明鼠标当前正物理处于 2.4G 通道，绝对优先
+    $usbRecentlyActive = $usbOnline -and $usbReady -and $script:Usb.At -and (((Get-Date) - $script:Usb.At).TotalSeconds -le 3)
+    if ($usbRecentlyActive) {
+        $lv = if ($script:Usb.HasData) { $script:Usb.Level }
+              elseif ($script:Cfg.LastUsbLevel -ge 0) { [int]$script:Cfg.LastUsbLevel }
+              else { -1 }
+        return @{ Mode = 'usb'; Online = $true; Level = $lv
+                  LastLevel = $lv; Name = $nmUsb; Idle = [bool]$script:Usb.Idle; At = $script:Usb.At }
+    }
+
+    # 2. 蓝牙在线展示：鼠标处于蓝牙模式且无即时 2.4G 抢占时展示蓝牙
     if ($bleOnline) {
         return @{ Mode = 'ble'; Online = $true; Level = $s.Level; LastLevel = $s.LastLevel
                   Name = $nmBle; Idle = $false; At = $s.LastGoodUpdate }
     }
 
-    # 2. 2.4G 处于活跃连接态（接收器插入、收到有效帧且未收到断开链路帧）
+    # 3. 2.4G 常规活跃连接态（3秒以上但未超时）
     if ($usbOnline -and $usbReady) {
         $lv = if ($script:Usb.HasData) { $script:Usb.Level }
               elseif ($script:Cfg.LastUsbLevel -ge 0) { [int]$script:Cfg.LastUsbLevel }
