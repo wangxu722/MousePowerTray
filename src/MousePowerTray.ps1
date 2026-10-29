@@ -136,10 +136,11 @@ function Get-RoundPath {
 
 function Get-StatusColor {
     param([int]$Level, [bool]$Online)
-    if (-not $Online -or $Level -lt 0) { return [System.Drawing.Color]::FromArgb(154, 163, 173) }
-    if ($Level -le $script:Cfg.LowPercent) { return [System.Drawing.Color]::FromArgb(240, 60, 60) }
-    if ($Level -le 40) { return [System.Drawing.Color]::FromArgb(255, 192, 54) }
-    return [System.Drawing.Color]::FromArgb(25, 250, 198)
+    if (-not $Online -or $Level -lt 0) { return [System.Drawing.Color]::FromArgb(145, 155, 170) }
+    $low = if ($script:Cfg -and $script:Cfg.LowPercent) { $script:Cfg.LowPercent } else { 15 }
+    if ($Level -le $low) { return [System.Drawing.Color]::FromArgb(255, 40, 75) }
+    if ($Level -le 40) { return [System.Drawing.Color]::FromArgb(255, 175, 20) }
+    return [System.Drawing.Color]::FromArgb(0, 240, 210)
 }
 
 # --------------------------------------------------------- 图标（现画）----
@@ -153,43 +154,99 @@ function New-MouseBitmap {
     $g.Clear([System.Drawing.Color]::Transparent)
 
     $s = [single]$Size
-    $x0 = $s * 0.19; $x1 = $s * 0.81
-    $y0 = $s * 0.06; $y1 = $s * 0.94
-    $w = $x1 - $x0; $h = $y1 - $y0
-    $path = Get-RoundPath $x0 $y0 $w $h ($w / 2.0)
+    # 扩大鼠标外廓至 76% 宽度，极大提升 16x16 / 32x32 托盘下的可见性与饱满度
+    $x0 = [single]([math]::Round($s * 0.12))
+    $x1 = [single]([math]::Round($s * 0.88))
+    $y0 = [single]([math]::Round($s * 0.05))
+    $y1 = [single]([math]::Round($s * 0.95))
+    $w = $x1 - $x0
+    $h = $y1 - $y0
+    $radius = [single]($w * 0.46)
+    $path = Get-RoundPath $x0 $y0 $w $h $radius
 
-    $accent = Get-StatusColor -Level $Level -Online $Online
-    if ($Online) { $empty = [System.Drawing.Color]::FromArgb(150, 156, 166) }
-    else { $empty = [System.Drawing.Color]::FromArgb(118, 124, 134); $accent = [System.Drawing.Color]::FromArgb(152, 159, 169) }
-
+    $low = if ($script:Cfg -and $script:Cfg.LowPercent) { $script:Cfg.LowPercent } else { 15 }
     $lvl = [math]::Max(0, [math]::Min(100, $Level))
     $fillTop = $y1 - ($h * ($lvl / 100.0))
 
-    $bEmpty = New-Object System.Drawing.SolidBrush($empty)
-    $bFill = New-Object System.Drawing.SolidBrush($accent)
-    $g.SetClip($path)
-    $g.FillRectangle($bEmpty, $x0, $y0, $w, $h)
-    if ($lvl -gt 0) { $g.FillRectangle($bFill, $x0, $fillTop, $w, ($y1 - $fillTop) + 0.5) }
-    $g.ResetClip()
+    # 电竞赛博风：双色渐变流光与专属暗色仓底
+    if (-not $Online -or $Level -lt 0) {
+        $cTop = [System.Drawing.Color]::FromArgb(115, 125, 140)
+        $cBot = [System.Drawing.Color]::FromArgb(65, 72, 85)
+        $cCap = [System.Drawing.Color]::FromArgb(150, 160, 175)
+        $bgTank = [System.Drawing.Color]::FromArgb(35, 40, 48)
+    }
+    elseif ($Level -le $low) {
+        $cTop = [System.Drawing.Color]::FromArgb(255, 30, 70)
+        $cBot = [System.Drawing.Color]::FromArgb(210, 0, 40)
+        $cCap = [System.Drawing.Color]::FromArgb(255, 120, 150)
+        $bgTank = [System.Drawing.Color]::FromArgb(50, 20, 26)
+    }
+    elseif ($Level -le 40) {
+        $cTop = [System.Drawing.Color]::FromArgb(255, 205, 0)
+        $cBot = [System.Drawing.Color]::FromArgb(255, 90, 0)
+        $cCap = [System.Drawing.Color]::FromArgb(255, 240, 120)
+        $bgTank = [System.Drawing.Color]::FromArgb(48, 38, 20)
+    }
+    else {
+        $cTop = [System.Drawing.Color]::FromArgb(0, 255, 200)
+        $cBot = [System.Drawing.Color]::FromArgb(0, 140, 255)
+        $cCap = [System.Drawing.Color]::FromArgb(170, 255, 240)
+        $bgTank = [System.Drawing.Color]::FromArgb(20, 36, 45)
+    }
 
-    $penW = [single]([math]::Max(1.0, $s * 0.075))
-    $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(38, 42, 48), $penW)
-    $pen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
-    $g.DrawPath($pen, $path)
+    # 绘制高对比度背景仓
+    $bTank = New-Object System.Drawing.SolidBrush($bgTank)
+    $g.FillPath($bTank, $path)
+    $bTank.Dispose()
 
-    $dark = [System.Drawing.Color]::FromArgb(38, 42, 48)
-    $penSeam = New-Object System.Drawing.Pen($dark, [single]([math]::Max(1.0, $s * 0.055)))
+    # 绘制赛博流光液面与发光波峰线
+    if ($lvl -gt 0) {
+        $fillH = ($y1 - $fillTop) + 0.5
+        $rectFill = New-Object System.Drawing.RectangleF($x0, $fillTop, $w, $fillH)
+        $lgb = New-Object System.Drawing.Drawing2D.LinearGradientBrush (New-Object System.Drawing.PointF($x0, $fillTop)), (New-Object System.Drawing.PointF($x0, $y1)), $cTop, $cBot
+        $g.SetClip($path)
+        $g.FillRectangle($lgb, $rectFill)
+        if ($lvl -lt 100) {
+            $penCap = New-Object System.Drawing.Pen($cCap, [single]1.0)
+            $g.DrawLine($penCap, $x0, $fillTop, $x1, $fillTop)
+            $penCap.Dispose()
+        }
+        $g.ResetClip()
+        $lgb.Dispose()
+    }
 
-    $wheelW = $s * 0.16; $wheelH = $s * 0.20
-    $wheelX = $s * 0.5 - $wheelW / 2
-    $wheelY = $y0 + $h * 0.13
-    $wheelPath = Get-RoundPath $wheelX $wheelY $wheelW $wheelH ($wheelW / 2)
-    $bDark = New-Object System.Drawing.SolidBrush($dark)
-    $g.FillPath($bDark, $wheelPath)
-    $g.DrawLine($penSeam, $s * 0.5, ($wheelY + $wheelH + 0.6), $s * 0.5, ($y0 + $h * 0.42))
+    # 双层边缘光圈：外层微光亮边（浅色/暗黑任务栏极佳适应） + 内层硬核防混线
+    $outGlowColor = if ($Online) { [System.Drawing.Color]::FromArgb(140, 220, 240, 255) } else { [System.Drawing.Color]::FromArgb(80, 180, 190, 200) }
+    $penOut = New-Object System.Drawing.Pen($outGlowColor, [single]1.0)
+    $penIn = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(18, 20, 24), [single]1.4)
+    $g.DrawPath($penOut, $path)
+    $g.DrawPath($penIn, $path)
+    $penOut.Dispose()
+    $penIn.Dispose()
 
-    $pen.Dispose(); $penSeam.Dispose(); $bEmpty.Dispose(); $bFill.Dispose(); $bDark.Dispose()
-    $wheelPath.Dispose(); $path.Dispose(); $g.Dispose()
+    # 机械滚轮与中缝刻线
+    $darkColor = [System.Drawing.Color]::FromArgb(15, 18, 22)
+    $wheelW = [single]([math]::Max(2.0, [math]::Round($s * 0.16)))
+    $wheelH = [single]([math]::Max(3.0, [math]::Round($s * 0.22)))
+    $wheelX = [single]($s * 0.5 - $wheelW / 2.0)
+    $wheelY = [single]($y0 + $h * 0.12)
+    $wheelPath = Get-RoundPath $wheelX $wheelY $wheelW $wheelH ($wheelW / 2.0)
+
+    $bWheel = New-Object System.Drawing.SolidBrush($darkColor)
+    $g.FillPath($bWheel, $wheelPath)
+    $penWheelRim = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(70, 255, 255, 255), [single]0.8)
+    $g.DrawPath($penWheelRim, $wheelPath)
+
+    $penSeam = New-Object System.Drawing.Pen($darkColor, [single]1.0)
+    $g.DrawLine($penSeam, [single]($s * 0.5), [single]($wheelY + $wheelH + 0.5), [single]($s * 0.5), [single]($y0 + $h * 0.40))
+
+    $bWheel.Dispose()
+    $penWheelRim.Dispose()
+    $penSeam.Dispose()
+    $wheelPath.Dispose()
+    $path.Dispose()
+    $g.Dispose()
+
     return $bmp
 }
 
