@@ -875,10 +875,13 @@ $script:UsbPresets = @(
     @{ Brand = 'Xiaomi';   Vid = '2717'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = -1; LinkIdx = -1 }
     # 狼蛛 AULA (SC580 / F87 等)
     @{ Brand = 'AULA';     Vid = '089D'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
-    # 瓦尔基里 VALKYRIE (VK M3 Series 实测 A8A5:2255 方案，00 AA 协议)
-    @{ Brand = 'VALKYRIE'; Vid = 'A8A5'; Pid = '2255'; UsagePage = 'FF01'; FrameType = 'AA'; LevelIdx = 5;  LinkIdx = 8 }
-    # 瓦尔基里 VALKYRIE (VK M3 / M1 / M2 / M5 备用方案)
+    # 瓦尔基里 VALKYRIE (VK M3 / M1 / M2 / M5 原厂方案)
     @{ Brand = 'VALKYRIE'; Vid = '248A'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
+    @{ Brand = 'VALKYRIE'; Vid = '248A'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
+    @{ Brand = 'VALKYRIE'; Vid = '249A'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
+    @{ Brand = 'VALKYRIE'; Vid = '249A'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
+    # 国产三模电竞方案 (A8A5:2255，00 AA 协议)
+    @{ Brand = 'OEM Gaming'; Vid = 'A8A5'; Pid = '2255'; UsagePage = 'FF01'; FrameType = 'AA'; LevelIdx = 5;  LinkIdx = 8 }
     @{ Brand = 'VALKYRIE'; Vid = '248A'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
     @{ Brand = 'VALKYRIE'; Vid = '249A'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
     @{ Brand = 'VALKYRIE'; Vid = '249A'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
