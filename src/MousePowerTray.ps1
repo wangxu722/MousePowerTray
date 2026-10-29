@@ -875,7 +875,9 @@ $script:UsbPresets = @(
     @{ Brand = 'Xiaomi';   Vid = '2717'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = -1; LinkIdx = -1 }
     # 狼蛛 AULA (SC580 / F87 等)
     @{ Brand = 'AULA';     Vid = '089D'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
-    # 瓦尔基里 VALKYRIE (VK M3 / M1 / M2 / M5 全系三模)
+    # 瓦尔基里 VALKYRIE (VK M3 Series 实测 A8A5:2255 方案，00 AA 协议)
+    @{ Brand = 'VALKYRIE'; Vid = 'A8A5'; Pid = '2255'; UsagePage = 'FF01'; FrameType = 'AA'; LevelIdx = 5;  LinkIdx = 8 }
+    # 瓦尔基里 VALKYRIE (VK M3 / M1 / M2 / M5 备用方案)
     @{ Brand = 'VALKYRIE'; Vid = '248A'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
     @{ Brand = 'VALKYRIE'; Vid = '248A'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
     @{ Brand = 'VALKYRIE'; Vid = '249A'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
@@ -1127,10 +1129,16 @@ function Update-UsbState {
         $link = 1
 
         if ($typeWant -ge 0 -and $b.Count -gt 1 -and $b[1] -eq $typeWant -and $lvIdx -ge 0 -and $lvIdx -lt $b.Count) {
-            # 命中标准厂商帧类型（如 00 D1 ...）
+            # 命中指定厂商帧类型（如 00 D1 ... 或 00 AA ...）
             $cand = [int]$b[$lvIdx]
             if ($cand -ge 0 -and $cand -le 100) { $lv = $cand }
             if ($lkIdx -ge 0 -and $lkIdx -lt $b.Count) { $link = [int]$b[$lkIdx] }
+        }
+        elseif ($b.Count -ge 9 -and $b[0] -eq 0x00 -and $b[1] -eq 0xAA) {
+            # 原生识别 00 AA 三模电竞鼠标帧（VK M3 / 富芮坤方案）
+            $cand = [int]$b[5]
+            if ($cand -ge 0 -and $cand -le 100) { $lv = $cand }
+            $link = [int]$b[8]
         }
         elseif ($lvIdx -ge 0 -and $lvIdx -lt $b.Count) {
             # 命中指定索引
