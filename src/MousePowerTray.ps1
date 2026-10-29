@@ -168,7 +168,7 @@ function New-MouseBitmap {
     $lvl = [math]::Max(0, [math]::Min(100, $Level))
     $fillTop = $y1 - ($h * ($lvl / 100.0))
 
-    # 电竞赛博风：双色渐变流光与专属暗色仓底
+    # 电竞风：双色渐变流光与专属暗色仓底
     if (-not $Online -or $Level -lt 0) {
         $cTop = [System.Drawing.Color]::FromArgb(115, 125, 140)
         $cBot = [System.Drawing.Color]::FromArgb(65, 72, 85)
@@ -199,7 +199,7 @@ function New-MouseBitmap {
     $g.FillPath($bTank, $path)
     $bTank.Dispose()
 
-    # 绘制赛博流光液面与发光波峰线
+    # 绘制流光液面与发光波峰线
     if ($lvl -gt 0) {
         $fillH = ($y1 - $fillTop) + 0.5
         $rectFill = New-Object System.Drawing.RectangleF($x0, $fillTop, $w, $fillH)
@@ -2418,7 +2418,7 @@ $miAuto.Checked = Get-Autostart
 $miDiag = $menu.Items.Add('读不到电量？收集诊断信息…')
 $miLog = $menu.Items.Add('打开日志')
 [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
-$miVer = $menu.Items.Add('MousePowerTray v2.0.0 (赛博机甲版)')
+$miVer = $menu.Items.Add('MousePowerTray v2.0.0')
 $miVer.Enabled = $false
 $miExit = $menu.Items.Add('退出')
 $script:NotifyIcon.ContextMenuStrip = $menu
