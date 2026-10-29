@@ -337,7 +337,6 @@ public static class HidBat
     static extern bool SetupDiEnumDeviceInterfaces(IntPtr s, IntPtr d, ref GUID g, int i, ref SP_DEVICE_INTERFACE_DATA x);
     [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern bool SetupDiGetDeviceInterfaceDetailW(IntPtr s, ref SP_DEVICE_INTERFACE_DATA x, IntPtr b, int n, out int r, IntPtr d);
-    // 带 DeviceInfoData 输出的版本：DeviceInfoData 是独立结构，不能指向 detail 缓冲区内部
     [DllImport("setupapi.dll", EntryPoint = "SetupDiGetDeviceInterfaceDetailW", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern bool SetupDiGetDeviceInterfaceDetailX(IntPtr s, ref SP_DEVICE_INTERFACE_DATA x, IntPtr b, int n, out int r, ref SP_DEVINFO_DATA d);
     [DllImport("setupapi.dll", SetLastError = true)]
@@ -356,6 +355,9 @@ public static class HidBat
     static extern int HidP_GetCaps(IntPtr pp, byte[] caps);
     [DllImport("hid.dll")]
     static extern bool HidD_FreePreparsedData(IntPtr pp);
+    [DllImport("hid.dll", SetLastError = true)]
+    static extern bool HidD_SetOutputReport(IntPtr h, byte[] reportBuffer, int reportBufferLength);
+
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern IntPtr CreateFileW(string f, uint acc, int share, IntPtr sa, uint disp, uint flags, IntPtr t);
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -372,6 +374,7 @@ public static class HidBat
     static extern bool CancelIoEx(IntPtr h, IntPtr ov);
 
     const uint GENERIC_READ = 0x80000000;
+    const uint GENERIC_WRITE = 0x40000000;
     const int FILE_SHARE_READ = 1, FILE_SHARE_WRITE = 2;
     const uint OPEN_EXISTING = 3, FILE_FLAG_OVERLAPPED = 0x40000000;
     const int DIGCF_PRESENT = 2, DIGCF_DEVICEINTERFACE = 0x10;
@@ -383,12 +386,17 @@ public static class HidBat
     public static string Path = "";
     public static string Error = "";
 
+    // 罗技 HID++ 协议状态机
+    static bool isLogitechMode = false;
+    static byte logiDevIdx = 0x01;
+    static byte featUnifiedBattery = 0;
+    static byte featBatteryLevel = 0;
+    static DateTime logiLastQuery = DateTime.MinValue;
+
     public static bool Start(int upage, int vid, int pid)
     {
         if (worker != null)
         {
-            // 线程还活着就直接复用；已经退了（设备被拔掉）必须清掉引用，
-            // 否则这里永远返回 true，却没有任何线程在读 —— 插回来也起不来。
             if (running) { return true; }
             try { worker.Join(400); } catch { }
             worker = null;
@@ -397,6 +405,10 @@ public static class HidBat
         if (path == null) return false;
         Path = path;
         Error = "";
+        isLogitechMode = (vid == 0x046D || upage == 0xFF00 || upage == 0xFF43);
+        featUnifiedBattery = 0;
+        featBatteryLevel = 0;
+        logiLastQuery = DateTime.MinValue;
         running = true;
         worker = new Thread(Loop);
         worker.IsBackground = true;
@@ -471,20 +483,123 @@ public static class HidBat
         return found;
     }
 
-    static void Loop()
+    static void SendLogiBatteryQuery(IntPtr h)
     {
-        IntPtr h = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero,
-                               OPEN_EXISTING, FILE_FLAG_OVERLAPPED, IntPtr.Zero);
-        if (h == INVALID) { Error = "open-failed " + Marshal.GetLastWin32Error(); running = false; return; }
-        int len = 33;
-        var buf = new byte[65];
         try
         {
+            if (featUnifiedBattery == 0 && featBatteryLevel == 0)
+            {
+                // 1. 查询 0x1004 (Unified Battery) 特征索引
+                byte[] q1004 = new byte[20];
+                q1004[0] = 0x11; q1004[1] = logiDevIdx; q1004[2] = 0x00; q1004[3] = 0x00;
+                q1004[4] = 0x10; q1004[5] = 0x04;
+                HidD_SetOutputReport(h, q1004, q1004.Length);
+
+                // 2. 同时查询 0x1000 (Battery Level Status) 特征索引
+                byte[] q1000 = new byte[20];
+                q1000[0] = 0x11; q1000[1] = logiDevIdx; q1000[2] = 0x00; q1000[3] = 0x00;
+                q1000[4] = 0x10; q1000[5] = 0x00;
+                HidD_SetOutputReport(h, q1000, q1000.Length);
+
+                // 3. 同时发送 HID++ 1.0 短报文（兼容旧款 G304 / M590 等）
+                byte[] qShort = new byte[7] { 0x10, logiDevIdx, 0x0D, 0x00, 0x00, 0x00, 0x00 };
+                HidD_SetOutputReport(h, qShort, qShort.Length);
+            }
+            else if (featUnifiedBattery != 0)
+            {
+                // 向 0x1004 发送 Function 0 (GetStatus)
+                byte[] q = new byte[20];
+                q[0] = 0x11; q[1] = logiDevIdx; q[2] = featUnifiedBattery; q[3] = 0x00;
+                HidD_SetOutputReport(h, q, q.Length);
+            }
+            else if (featBatteryLevel != 0)
+            {
+                // 向 0x1000 发送 Function 0 (GetBatteryLevelStatus)
+                byte[] q = new byte[20];
+                q[0] = 0x11; q[1] = logiDevIdx; q[2] = featBatteryLevel; q[3] = 0x00;
+                HidD_SetOutputReport(h, q, q.Length);
+            }
+        }
+        catch { }
+    }
+
+    static void Loop()
+    {
+        IntPtr h = INVALID;
+        if (isLogitechMode)
+        {
+            // 罗技优先以读写模式打开下发查询命令；若写权限被独占则平滑降级为只读
+            h = CreateFileW(Path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                            IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, IntPtr.Zero);
+        }
+        if (h == INVALID)
+        {
+            h = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero,
+                            OPEN_EXISTING, FILE_FLAG_OVERLAPPED, IntPtr.Zero);
+        }
+        if (h == INVALID) { Error = "open-failed " + Marshal.GetLastWin32Error(); running = false; return; }
+
+        int len = isLogitechMode ? 64 : 33;
+        var buf = new byte[128];
+        try
+        {
+            if (isLogitechMode)
+            {
+                SendLogiBatteryQuery(h);
+                logiLastQuery = DateTime.Now;
+            }
+
             while (running)
             {
+                if (isLogitechMode && (DateTime.Now - logiLastQuery).TotalSeconds >= 25)
+                {
+                    SendLogiBatteryQuery(h);
+                    logiLastQuery = DateTime.Now;
+                }
+
                 int got = ReadWithTimeout(h, buf, len, 500);
                 if (got > 0)
                 {
+                    if (isLogitechMode)
+                    {
+                        if (buf[0] == 0x11) // Long Report
+                        {
+                            if (buf[2] == 0x00 && buf[3] == 0x00)
+                            {
+                                byte idx = buf[4];
+                                if (idx > 0)
+                                {
+                                    if (featUnifiedBattery == 0) { featUnifiedBattery = idx; }
+                                    else if (featBatteryLevel == 0) { featBatteryLevel = idx; }
+                                    SendLogiBatteryQuery(h);
+                                }
+                            }
+                            else if ((featUnifiedBattery != 0 && buf[2] == featUnifiedBattery) ||
+                                     (featBatteryLevel != 0 && buf[2] == featBatteryLevel) ||
+                                     (buf[4] > 0 && buf[4] <= 100 && buf[2] > 0 && buf[2] < 0x20))
+                            {
+                                int lvl = (int)buf[4];
+                                int chg = ((buf[6] >= 1 && buf[6] <= 3) || (buf[5] >= 1 && buf[5] <= 3)) ? 1 : 0;
+                                if (lvl >= 0 && lvl <= 100)
+                                {
+                                    queue.Enqueue(string.Format("HIDPP|{0}|{1}|{2}", lvl, chg, DateTime.Now.ToString("HH:mm:ss")));
+                                }
+                            }
+                        }
+                        else if (buf[0] == 0x10) // Short Report
+                        {
+                            if (buf[2] == 0x0D || buf[2] == 0x0F)
+                            {
+                                int lvl = (int)buf[3];
+                                if (lvl <= 0 || lvl > 100) lvl = (int)buf[4];
+                                if (lvl >= 0 && lvl <= 100)
+                                {
+                                    queue.Enqueue(string.Format("HIDPP|{0}|0|{1}", lvl, DateTime.Now.ToString("HH:mm:ss")));
+                                }
+                            }
+                        }
+                    }
+
                     var sb = new StringBuilder();
                     for (int i = 0; i < got; i++) sb.Append(buf[i].ToString("X2"));
                     queue.Enqueue(sb.ToString() + "|" + DateTime.Now.ToString("HH:mm:ss"));
@@ -511,7 +626,13 @@ public static class HidBat
             int read;
             bool ok = ReadFile(h, buf, len, out read, ov);
             if (!ok && Marshal.GetLastWin32Error() != 997) return -1;
-            if (WaitForSingleObject(ev, (uint)ms) != 0) { CancelIoEx(h, ov); return 0; }
+            if (WaitForSingleObject(ev, (uint)ms) != 0)
+            {
+                CancelIoEx(h, ov);
+                int dummy;
+                GetOverlappedResult(h, ov, out dummy, true); // 等待内核取消彻底完成，防止悬挂指针破坏内存
+                return 0;
+            }
             int got;
             if (!GetOverlappedResult(h, ov, out got, false)) return -1;
             return got;
@@ -554,9 +675,9 @@ public static class HidBat
                     var devInfo = new SP_DEVINFO_DATA();
                     devInfo.cbSize = Marshal.SizeOf(typeof(SP_DEVINFO_DATA));
                     if (!SetupDiGetDeviceInterfaceDetailX(set, ref did, buf, need, out need, ref devInfo)) continue;
-                    // DevicePath 偏移随位数变化，两种布局都试一次，认 \\?\ 开头的那份
+                    // DevicePath 偏移随位数变化，两种布局都试一次，认 \?\ 开头的那份
                     string path = Marshal.PtrToStringUni(new IntPtr(buf.ToInt64() + 8));
-                    if (string.IsNullOrEmpty(path) || !path.StartsWith("\\\\?\\"))
+                    if (string.IsNullOrEmpty(path) || !path.StartsWith("\\?\"))
                         path = Marshal.PtrToStringUni(new IntPtr(buf.ToInt64() + 4));
                     if (string.IsNullOrEmpty(path)) continue;
 
@@ -607,11 +728,9 @@ public static class HidBat
     }
 
     // ---- 诊断用：同时监听多条厂商通道，把每一帧带时间戳交给回调 ----
-    // targets 每项为 "usagePage:len:vid:pid"（统一十进制，vid/pid 可为 0 = 不校验），
-    // 返回实际启动了几条。
-    // 必须带 VID/PID：光按 usagePage 找会撞上触摸板那类同样用 0xFFxx 的设备。
     static volatile bool capturing = false;
     static int captureGen = 0;
+    static readonly List<Thread> capThreads = new List<Thread>();
     public static string CapError = "";
 
     public static int CaptureStart(string[] targets)
@@ -619,6 +738,7 @@ public static class HidBat
         StopCapture();
         int gen = ++captureGen;      // 代际令牌：让上一轮的旧线程自己退出
         capturing = true;
+        capThreads.Clear();
         int ok = 0;
         foreach (var t in targets)
         {
@@ -635,6 +755,7 @@ public static class HidBat
             var th = new Thread(CaptureLoop);
             th.IsBackground = true;
             th.Start(arg);
+            capThreads.Add(th);
             ok++;
         }
         if (ok == 0) capturing = false;
@@ -668,22 +789,103 @@ public static class HidBat
         finally { CloseHandle(h); }
     }
 
-    public static void StopCapture() { capturing = false; }
+    public static void StopCapture()
+    {
+        capturing = false;
+        foreach (var th in capThreads)
+        {
+            try { th.Join(500); } catch { }
+        }
+        capThreads.Clear();
+    }
 }
 '@
 
-function Start-UsbListener {
-    if ($script:UsbWorker) { return }
-    # 没有配置厂商通道就完全不碰 USB —— 默认不去猜别人的接收器
-    if (-not $script:Cfg.UsbUsagePage) { return }
+# --------------------------------------------- 2.4G 主流品牌预设库 ----
+$script:UsbPresets = @(
+    # 罗技 Logitech 全系 (Lightspeed / Unifying / Bolt)
+    @{ Brand = 'Logitech'; Vid = '046D'; UsagePage = 'FF00'; FrameType = 'HIDPP'; LevelIdx = -1; LinkIdx = -1 }
+    @{ Brand = 'Logitech'; Vid = '046D'; UsagePage = 'FF43'; FrameType = 'HIDPP'; LevelIdx = -1; LinkIdx = -1 }
+    # 狼蛛 AULA (SC580 / F87 等)
+    @{ Brand = 'AULA';     Vid = '089D'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
+    # VGN / ATK (蜻蜓 F1 系列 / ATK A9 / 烈空等)
+    @{ Brand = 'VGN/ATK';  Vid = '341A'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
+    @{ Brand = 'VGN/ATK';  Vid = '341A'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
+    # 达尔优 DAREU (A950 / A980 等中颖方案)
+    @{ Brand = 'DAREU';    Vid = '258A'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
+    @{ Brand = 'DAREU';    Vid = '258A'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
+    # 雷柏 Rapoo (VT9 / VT9S / VT9Pro 系列)
+    @{ Brand = 'Rapoo';    Vid = '24AE'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
+    @{ Brand = 'Rapoo';    Vid = '24AE'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
+    # 迈从 MCHOSE (A5 / AX5 / G3 等)
+    @{ Brand = 'MCHOSE';   Vid = '3554'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
+    # 双飞燕 A4Tech / 血手幽灵
+    @{ Brand = 'A4Tech';   Vid = '09DA'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
+)
+$script:ActivePreset = $null
+
+function Find-UsbPreset {
     try {
         if (-not ('HidBat' -as [type])) {
             Add-Type -TypeDefinition $script:UsbCSharp -Language CSharp -ErrorAction Stop
         }
-        $vid = 0; $pid_ = 0
+        $enumRows = [HidBat]::Enumerate()
+        if (-not $enumRows -or $enumRows[0] -eq 'ENUM-FAILED') { return $null }
+
+        foreach ($row in $enumRows) {
+            $parts = $row -split '\|'
+            if ($parts.Count -lt 9) { continue }
+            $vid = $parts[0]; $pid = $parts[1]; $upage = $parts[2]
+
+            foreach ($p in $script:UsbPresets) {
+                if ($p.Vid.ToUpperInvariant() -eq $vid.ToUpperInvariant() -and
+                    ($p.UsagePage.ToUpperInvariant() -eq $upage.ToUpperInvariant() -or -not $p.UsagePage)) {
+                    return @{
+                        Brand       = $p.Brand
+                        Vid         = $vid
+                        Pid         = $pid
+                        UsagePage   = $upage
+                        FrameType   = $p.FrameType
+                        LevelIdx    = $p.LevelIdx
+                        LinkIdx     = $p.LinkIdx
+                        ProductName = $parts[7]
+                    }
+                }
+            }
+        }
+    }
+    catch { }
+    return $null
+}
+
+function Start-UsbListener {
+    if ($script:UsbWorker) { return }
+
+    $vid = 0; $pid_ = 0; $upage = 0
+    if ($script:Cfg.UsbUsagePage) {
         if ($script:Cfg.UsbVid) { $vid = [Convert]::ToInt32(('0x' + $script:Cfg.UsbVid), 16) }
         if ($script:Cfg.UsbPid) { $pid_ = [Convert]::ToInt32(('0x' + $script:Cfg.UsbPid), 16) }
         $upage = [Convert]::ToInt32(('0x' + $script:Cfg.UsbUsagePage), 16)
+    }
+    else {
+        # 自动从主流预设库中识别已连接的接收器
+        $preset = Find-UsbPreset
+        if ($preset) {
+            $vid = [Convert]::ToInt32(('0x' + $preset.Vid), 16)
+            $pid_ = [Convert]::ToInt32(('0x' + $preset.Pid), 16)
+            $upage = [Convert]::ToInt32(('0x' + $preset.UsagePage), 16)
+            $script:ActivePreset = $preset
+            Write-Log ('USB-PRESET-MATCH brand={0} vid:pid={1}:{2} upage=0x{3}' -f $preset.Brand, $preset.Vid, $preset.Pid, $preset.UsagePage)
+        }
+        else {
+            return
+        }
+    }
+
+    try {
+        if (-not ('HidBat' -as [type])) {
+            Add-Type -TypeDefinition $script:UsbCSharp -Language CSharp -ErrorAction Stop
+        }
         if ([HidBat]::Start($upage, $vid, $pid_)) {
             $script:UsbWorker = $true
             Write-Log ('USB-START ' + [HidBat]::Path)
@@ -722,6 +924,29 @@ function Update-UsbState {
     try { if ($null -ne $script:Cfg.UsbLinkIndex) { $lkIdx = [int]$script:Cfg.UsbLinkIndex } } catch { }
 
     foreach ($f in $frames) {
+        # 罗技 HID++ 专用高层帧处理
+        if ($f -like 'HIDPP|*') {
+            $p = $f -split '\|'
+            if ($p.Count -ge 3) {
+                $lv = [int]$p[1]
+                $chg = ($p[2] -eq '1')
+                if ($lv -ge 0 -and $lv -le 100) {
+                    if (-not $script:Usb.HasData -or $script:Usb.Level -ne $lv) { $changed = $true }
+                    $script:Usb.HasData = $true
+                    $script:Usb.Level = $lv
+                    $script:Usb.At = Get-Date
+                    if (-not $script:Usb.Online) { $changed = $true }
+                    $script:Usb.Online = $true
+                    $script:Usb.Idle = $false
+                    if ($script:Cfg.Debug) {
+                        Write-Log ('LOGI-HIDPP level={0} charging={1}' -f $lv, $chg)
+                    }
+                    if ($script:Cfg.LastUsbLevel -ne $lv) { $script:Cfg.LastUsbLevel = $lv; Save-Config }
+                }
+            }
+            continue
+        }
+
         $hex, $ts = $f -split '\|'
         if ($hex.Length -lt 8) { continue }
         $b = @()
@@ -783,7 +1008,8 @@ $script:WorkerScan = $false
 $script:NeedScan = $false
 $script:ForceRescan = $false
 $script:PendingRefresh = $false        # 刷新时正好有探测在跑 → 排队，别丢掉这次点击
-$script:VerifyAt = $null               # 手动刷新后的二次确认时刻（PnP 移除有延迟）
+$script:VerifyAt = $null               # 手动刷新或断连防抖的二次确认时刻（PnP 移除有延迟）
+$script:PendingOffline = $false        # 离线确认中标志，防止瞬时抖动跳灰
 $script:PickerPending = $false
 $script:FailCount = 0
 $script:MissStreak = 0                # 连续读不到设备的次数（成功即清零）
@@ -909,8 +1135,19 @@ function Apply-ProbeResult {
         }
         # 从在线翻成离线时补验一次，避免一次瞬时抖动就把图标判灰
         if ($script:State.Online -and -not $dev.Online) {
-            $script:VerifyAt = (Get-Date).AddSeconds(2)
-            Write-Log 'STATE online -> offline (verify in 2s)'
+            if (-not $script:PendingOffline) {
+                $script:PendingOffline = $true
+                $script:VerifyAt = (Get-Date).AddSeconds(3)
+                Write-Log 'STATE online -> offline (defer verify in 3s)'
+                $dev.Online = $true  # 保持当前在线状态，等待二次确认
+            }
+            else {
+                $script:PendingOffline = $false
+                $script:VerifyAt = $null
+            }
+        }
+        else {
+            $script:PendingOffline = $false
         }
         $script:State.Id = $dev.Id
         $script:State.Name = $dev.Name
@@ -951,21 +1188,36 @@ function Apply-ProbeResult {
 function Get-DisplayState {
     $s = $script:State
     $bleOnline = [bool]$s.Online
+    $usbOnline = $script:UsbWorker -and [bool]$script:Usb.Online
     $usbReady = $script:UsbWorker -and $script:Usb.HasData
     $nmBle = if ($s.Name) { $s.Name } else { $script:AppName }
-    $nmUsb = if ($script:Cfg.DeviceName) { $script:Cfg.DeviceName } elseif ($s.Name) { $s.Name } else { $script:AppName }
+    $presetName = if ($script:ActivePreset) { $script:ActivePreset.Brand + ' 鼠标' } else { '' }
+    $nmUsb = if ($script:Cfg.DeviceName) { $script:Cfg.DeviceName } elseif ($presetName) { $presetName } elseif ($s.Name) { $s.Name } else { $script:AppName }
 
+    # 1. 优先展示在线设备
     if ($bleOnline) {
         return @{ Mode = 'ble'; Online = $true; Level = $s.Level; LastLevel = $s.LastLevel
                   Name = $nmBle; Idle = $false; At = $s.LastGoodUpdate }
     }
-    if ($usbReady) {
-        return @{ Mode = 'usb'; Online = [bool]$script:Usb.Online; Level = $script:Usb.Level
+    if ($usbOnline) {
+        return @{ Mode = 'usb'; Online = $true; Level = $script:Usb.Level
                   LastLevel = $script:Usb.Level; Name = $nmUsb; Idle = [bool]$script:Usb.Idle; At = $script:Usb.At }
     }
-    if ($script:UsbWorker) {
-        $lv = if ($script:Cfg.LastUsbLevel -ge 0) { [int]$script:Cfg.LastUsbLevel } else { -1 }
-        return @{ Mode = 'usb'; Online = $false; Level = $lv; LastLevel = $lv
+
+    # 2. 都断开时，比较哪种模式是最近活跃的（避免 2.4G 接收器插着就永远遮蔽蓝牙断连电量）
+    $hasBleLast = ($s.LastLevel -ge 0)
+    $hasUsbLast = ($usbReady -and $script:Usb.Level -ge 0)
+
+    if ($hasBleLast -and (-not $hasUsbLast -or ($s.LastSeen -and $script:Usb.At -and $s.LastSeen -ge $script:Usb.At))) {
+        return @{ Mode = 'ble'; Online = $false; Level = $s.LastLevel; LastLevel = $s.LastLevel
+                  Name = $nmBle; Idle = $false; At = $s.LastGoodUpdate }
+    }
+    if ($hasUsbLast) {
+        return @{ Mode = 'usb'; Online = $false; Level = $script:Usb.Level
+                  LastLevel = $script:Usb.Level; Name = $nmUsb; Idle = [bool]$script:Usb.Idle; At = $script:Usb.At }
+    }
+    if ($script:UsbWorker -and $script:Cfg.LastUsbLevel -ge 0) {
+        return @{ Mode = 'usb'; Online = $false; Level = [int]$script:Cfg.LastUsbLevel; LastLevel = [int]$script:Cfg.LastUsbLevel
                   Name = $nmUsb; Idle = $false; At = $null }
     }
     return @{ Mode = $s.Mode; Online = $false; Level = $s.LastLevel; LastLevel = $s.LastLevel
@@ -1247,11 +1499,18 @@ function New-Popup {
 }
 
 function Show-Popup {
-    $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-    $script:Popup.Location = New-Object System.Drawing.Point(
-        ($wa.Right - $script:Popup.Width - 10), ($wa.Bottom - $script:Popup.Height - 10))
+    $curPt = [System.Windows.Forms.Cursor]::Position
+    $scr = [System.Windows.Forms.Screen]::FromPoint($curPt)
+    $wa = $scr.WorkingArea
+    $x = [int]($wa.Right - $script:Popup.Width - 10)
+    $y = [int]($wa.Bottom - $script:Popup.Height - 10)
+    if ($curPt.Y -lt ($wa.Top + 100) -and $scr.Bounds.Top -lt $wa.Top) {
+        $y = [int]($wa.Top + 10)
+    }
+    $script:Popup.Location = New-Object System.Drawing.Point($x, $y)
     $script:Popup.Show()
     $script:Popup.BringToFront()
+    $script:Popup.Activate()
     $script:PopupUntil = (Get-Date).AddSeconds(4)
 }
 
@@ -1270,8 +1529,13 @@ function Set-Autostart {
         if ($Enable) {
             $vbs = Join-Path $script:AppDir 'MousePowerTray.vbs'
             $ps1 = Join-Path $script:Root 'MousePowerTray.ps1'
-            $cmd = if (Test-Path -LiteralPath $vbs) { 'wscript.exe "{0}"' -f $vbs }
-                   else { 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $ps1 }
+            $sysRoot = $env:SystemRoot
+            if (-not $sysRoot) { $sysRoot = 'C:\Windows' }
+            $wscriptExe = Join-Path $sysRoot 'System32\wscript.exe'
+            $psExe = Join-Path $sysRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+
+            $cmd = if (Test-Path -LiteralPath $vbs) { '"{0}" "{1}"' -f $wscriptExe, $vbs }
+                   else { '"{0}" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{1}"' -f $psExe, $ps1 }
             New-ItemProperty -Path $script:RunKey -Name $script:RunName -Value $cmd -PropertyType String -Force | Out-Null
             Write-Log ('AUTOSTART-ON ' + $cmd)
         }
@@ -1286,6 +1550,14 @@ function Set-Autostart {
 function Stop-App {
     try { $script:NotifyIcon.Visible = $false; $script:NotifyIcon.Dispose() } catch { }
     try { if ($script:Popup) { $script:Popup.Dispose() } } catch { }
+    # 收掉后台 Runspace
+    try {
+        if ($script:Worker) {
+            $script:Worker.Stop()
+            $script:Worker.Dispose()
+            $script:Worker = $null
+        }
+    } catch { }
     # 收掉 HID 读线程，别让它占着设备句柄不放
     try { if ('HidBat' -as [type]) { [HidBat]::Stop(); [HidBat]::StopCapture() } } catch { }
     try { if ($script:Mutex) { $script:Mutex.ReleaseMutex(); $script:Mutex.Dispose() } } catch { }
@@ -1884,13 +2156,24 @@ $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 1000
 $timer.Add_Tick({
     Update-UsbState
-    # 接收器可能后插上来，没启动过就每 30 秒试一次（没配置厂商通道就别空转）
-    if ($script:Cfg.UsbUsagePage -and -not $script:UsbWorker -and
-        ((Get-Date) - $script:UsbTryAt).TotalSeconds -ge 30) {
+    # 接收器可能后插上来，未启动时每 30 秒探测一次（支持用户配置或预设库匹配）
+    if (-not $script:UsbWorker -and ((Get-Date) - $script:UsbTryAt).TotalSeconds -ge 30) {
         $script:UsbTryAt = Get-Date
         Start-UsbListener
     }
-    if ($script:Worker) { Complete-Probe }
+    # 看门狗：后台探测超过 15 秒判定为驱动/PnP 阻塞，强制重置
+    if ($script:Worker) {
+        if (((Get-Date) - $script:WorkerStart).TotalSeconds -gt 15) {
+            Write-Log 'PROBE-TIMEOUT worker hung > 15s, resetting'
+            try { $script:Worker.Stop() } catch { }
+            try { $script:Worker.Dispose() } catch { }
+            $script:Worker = $null
+            $script:WorkerHandle = $null
+        }
+        else {
+            Complete-Probe
+        }
+    }
     elseif ($script:PendingRefresh) { $script:PendingRefresh = $false; Start-Probe }
     elseif ($script:VerifyAt -and (Get-Date) -ge $script:VerifyAt) { $script:VerifyAt = $null; Start-Probe }
     elseif (((Get-Date) - $script:WorkerStart).TotalMilliseconds -ge ($script:Cfg.RefreshSeconds * 1000)) {
