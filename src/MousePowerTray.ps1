@@ -35,7 +35,7 @@ Add-Type -AssemblyName System.Drawing
 # ---------------------------------------------------------------- 常量 ----
 $script:AppName = '鼠标电量'
 $script:AppId = 'MousePowerTray'
-$script:AppVersion = '1.2.0'
+$script:AppVersion = '2.0.0'
 $script:DevKey = '{104EA319-6EE2-4701-BD47-8DDBF425BBE5}'   # DEVPKEY_Bluetooth_Battery
 $script:RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $script:RunName = $script:AppId
@@ -2303,6 +2303,9 @@ $miAuto.Checked = Get-Autostart
 [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 $miDiag = $menu.Items.Add('读不到电量？收集诊断信息…')
 $miLog = $menu.Items.Add('打开日志')
+[void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+$miVer = $menu.Items.Add('MousePowerTray v2.0.0 (赛博机甲版)')
+$miVer.Enabled = $false
 $miExit = $menu.Items.Add('退出')
 $script:NotifyIcon.ContextMenuStrip = $menu
 
