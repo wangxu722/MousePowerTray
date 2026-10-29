@@ -875,6 +875,11 @@ $script:UsbPresets = @(
     @{ Brand = 'Xiaomi';   Vid = '2717'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = -1; LinkIdx = -1 }
     # 狼蛛 AULA (SC580 / F87 等)
     @{ Brand = 'AULA';     Vid = '089D'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
+    # 瓦尔基里 VALKYRIE (VK M3 / M1 / M2 / M5 全系三模)
+    @{ Brand = 'VALKYRIE'; Vid = '248A'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
+    @{ Brand = 'VALKYRIE'; Vid = '248A'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
+    @{ Brand = 'VALKYRIE'; Vid = '249A'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
+    @{ Brand = 'VALKYRIE'; Vid = '249A'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
     # VGN / ATK (蜻蜓 F1 系列 / ATK A9 / 烈空等)
     @{ Brand = 'VGN/ATK';  Vid = '341A'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
     @{ Brand = 'VGN/ATK';  Vid = '341A'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
@@ -966,9 +971,10 @@ function Find-UsbPreset {
             try { $upageInt = [Convert]::ToInt32($upage, 16) } catch { }
             if ($upageInt -lt 0xFF00) { continue }
             $prod = $parts[7]
-            if ($prod -match 'Mouse|Combo|Wireless|Keyboard') {
+            if ($prod -match 'VK|Valkyrie|Mouse|Combo|Wireless|Keyboard|Series|Dongle|Receiver') {
+                $brandGuess = if ($prod -match 'VK|Valkyrie') { 'VALKYRIE' } else { 'Generic USB' }
                 return @{
-                    Brand       = 'Generic USB'
+                    Brand       = $brandGuess
                     Vid         = $vid
                     Pid         = $devPid
                     UsagePage   = $upage
@@ -1396,6 +1402,8 @@ function Get-UsbDeviceDisplayName {
         'Razer'       = '雷蛇 (Razer)'
         'SteelSeries' = '赛睿 (SteelSeries)'
         'ASUS'        = '华硕 (ROG)'
+        'VALKYRIE'    = '瓦尔基里 (VALKYRIE)'
+        'VK'          = '瓦尔基里 (VK)'
     }
 
     $brandCn = if ($brand -and $brandMap.ContainsKey($brand)) { $brandMap[$brand] }
@@ -1411,6 +1419,8 @@ function Get-UsbDeviceDisplayName {
     if ($BleName -and $BleName -ne $script:AppName) {
         $brandPattern = switch ($brand) {
             'AULA'     { 'AULA|狼蛛' }
+            'VALKYRIE' { 'VALKYRIE|VK|瓦尔基里|M3' }
+            'VK'       { 'VALKYRIE|VK|瓦尔基里|M3' }
             'Xiaomi'   { 'Xiaomi|Mi|小米' }
             'Inphic'   { 'Inphic|英菲克' }
             'A4Tech'   { 'A4Tech|Bloody|Fstyler|双飞燕|血手|飞时代' }
