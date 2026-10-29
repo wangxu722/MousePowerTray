@@ -919,76 +919,84 @@ $script:UsbPresets = @(
 )
 $script:ActivePreset = $null
 
-function Find-UsbPreset {
+# 动态全自适应 2.4G 扫描引擎：直接提取真实插入的物理 USB HID 节点的 VID/PID/UsagePage
+function Get-AllUsbCandidates {
+    $results = New-Object System.Collections.ArrayList
     try {
         if (-not ('HidBat' -as [type])) {
             Add-Type -TypeDefinition $script:UsbCSharp -Language CSharp -ErrorAction Stop
         }
         $enumRows = [HidBat]::Enumerate()
-        if (-not $enumRows -or $enumRows[0] -eq 'ENUM-FAILED') { return $null }
+        if (-not $enumRows -or $enumRows[0] -eq 'ENUM-FAILED') { return @() }
 
-        # 第一轮：优先匹配预设品牌库（要求具备 InLen > 0 可读端点）
         foreach ($row in $enumRows) {
             $parts = $row -split '\|'
             if ($parts.Count -lt 9) { continue }
             $vid = $parts[0]; $devPid = $parts[1]; $upage = $parts[2]
-            $inLen = 0
-            try { $inLen = [int]$parts[4] } catch { }
+            $inLen = 0; try { $inLen = [int]$parts[4] } catch { }
             if ($inLen -le 0) { continue }
 
-            $upageInt = 0
-            try { $upageInt = [Convert]::ToInt32($upage, 16) } catch { }
+            $upageInt = 0; try { $upageInt = [Convert]::ToInt32($upage, 16) } catch { }
+            # 严格筛选具有厂商自定义私有通信协议（UsagePage >= 0xFF00）的端点
             if ($upageInt -lt 0xFF00) { continue }
 
+            # 排除非物理 USB 节点（如 I2C/ACPI 内部触摸板）
+            $inst = $parts[8]
+            if ($inst -notlike 'USB\*' -and $inst -notlike 'HID\VID_*') { continue }
+
+            $prod = if ($parts[7]) { $parts[7].Trim() } else { '' }
+
+            # 1. 尝试匹配内置预设优化参数（Logitech HIDPP / 专用帧头等）
+            $matchedPreset = $null
             foreach ($p in $script:UsbPresets) {
                 if ($p.Vid.ToUpperInvariant() -eq $vid.ToUpperInvariant()) {
+                    if ($p.Pid -and $p.Pid.ToUpperInvariant() -ne $devPid.ToUpperInvariant()) { continue }
                     if (-not $p.UsagePage -or $p.UsagePage.ToUpperInvariant() -eq $upage.ToUpperInvariant()) {
-                        return @{
-                            Brand       = $p.Brand
-                            Vid         = $vid
-                            Pid         = $devPid
-                            UsagePage   = $upage
-                            FrameType   = $p.FrameType
-                            LevelIdx    = $p.LevelIdx
-                            LinkIdx     = $p.LinkIdx
-                            ProductName = $parts[7]
-                            InLen       = $inLen
-                        }
+                        $matchedPreset = $p
+                        break
                     }
                 }
             }
-        }
 
-        # 第二轮：通用 2.4G 接收器自动识别（产品名含 Mouse/Combo/Wireless 且具备厂商私有通道）
-        foreach ($row in $enumRows) {
-            $parts = $row -split '\|'
-            if ($parts.Count -lt 9) { continue }
-            $vid = $parts[0]; $devPid = $parts[1]; $upage = $parts[2]
-            $inLen = 0
-            try { $inLen = [int]$parts[4] } catch { }
-            if ($inLen -le 0) { continue }
-            $upageInt = 0
-            try { $upageInt = [Convert]::ToInt32($upage, 16) } catch { }
-            if ($upageInt -lt 0xFF00) { continue }
-            $prod = $parts[7]
-            if ($prod -match 'VK|Valkyrie|Mouse|Combo|Wireless|Keyboard|Series|Dongle|Receiver') {
-                $brandGuess = if ($prod -match 'VK|Valkyrie') { 'VALKYRIE' } else { 'Generic USB' }
-                return @{
-                    Brand       = $brandGuess
-                    Vid         = $vid
-                    Pid         = $devPid
-                    UsagePage   = $upage
-                    FrameType   = ''
-                    LevelIdx    = -1
-                    LinkIdx     = -1
-                    ProductName = $prod
-                    InLen       = $inLen
-                }
+            $brand = if ($matchedPreset) { $matchedPreset.Brand }
+                     elseif ($prod -match '(?i)VK|Valkyrie') { 'VALKYRIE' }
+                     elseif ($prod -match '(?i)AULA') { 'AULA' }
+                     elseif ($prod -match '(?i)Xiaomi|Mi') { 'Xiaomi' }
+                     elseif ($prod -match '(?i)Logi') { 'Logitech' }
+                     elseif ($prod -match '(?i)VGN|ATK') { 'VGN/ATK' }
+                     elseif ($prod -match '(?i)MCHOSE') { 'MCHOSE' }
+                     elseif ($prod -match '(?i)DAREU') { 'DAREU' }
+                     elseif ($prod -match '(?i)Inphic') { 'Inphic' }
+                     elseif ($prod -match '(?i)A4Tech|Bloody|Fstyler') { 'A4Tech' }
+                     else { 'USB 2.4G' }
+
+            $item = @{
+                Brand       = $brand
+                Vid         = $vid
+                Pid         = $devPid
+                UsagePage   = $upage
+                FrameType   = if ($matchedPreset) { $matchedPreset.FrameType } else { '' }
+                LevelIdx    = if ($matchedPreset) { $matchedPreset.LevelIdx } else { -1 }
+                LinkIdx     = if ($matchedPreset) { $matchedPreset.LinkIdx } else { -1 }
+                ProductName = $prod
+                InLen       = $inLen
+                InstanceId  = $inst
+                IsPreset    = [bool]$matchedPreset
             }
+            [void]$results.Add($item)
         }
     }
     catch { }
-    return $null
+    return @($results)
+}
+
+function Find-UsbPreset {
+    $candidates = Get-AllUsbCandidates
+    if ($candidates.Count -eq 0) { return $null }
+    # 优先返回命中已知优化预设的节点，若无则直接采用扫描到的第一个具备私有通道的有效 USB 硬件节点
+    $presetHit = @($candidates | Where-Object { $_.IsPreset }) | Select-Object -First 1
+    if ($presetHit) { return $presetHit }
+    return $candidates[0]
 }
 
 function Start-UsbListener {
@@ -999,6 +1007,18 @@ function Start-UsbListener {
         try { if ($script:Cfg.UsbVid) { $vid = [Convert]::ToInt32(('0x' + $script:Cfg.UsbVid), 16) } } catch { }
         try { if ($script:Cfg.UsbPid) { $pid_ = [Convert]::ToInt32(('0x' + $script:Cfg.UsbPid), 16) } } catch { }
         try { if ($script:Cfg.UsbUsagePage) { $upage = [Convert]::ToInt32(('0x' + $script:Cfg.UsbUsagePage), 16) } } catch { }
+        if (-not $script:ActivePreset) {
+            $script:ActivePreset = @{
+                Brand       = $(if ($script:Cfg.DeviceName) { $script:Cfg.DeviceName } else { 'USB 2.4G' })
+                Vid         = $script:Cfg.UsbVid
+                Pid         = $script:Cfg.UsbPid
+                UsagePage   = $script:Cfg.UsbUsagePage
+                FrameType   = $script:Cfg.UsbFrameType
+                LevelIdx    = if ($null -ne $script:Cfg.UsbLevelIndex) { [int]$script:Cfg.UsbLevelIndex } else { -1 }
+                LinkIdx     = if ($null -ne $script:Cfg.UsbLinkIndex) { [int]$script:Cfg.UsbLinkIndex } else { -1 }
+                ProductName = $script:Cfg.DeviceName
+            }
+        }
     }
     else {
         # 自动从主流预设库中识别已连接的接收器
@@ -1588,23 +1608,30 @@ function Start-DiagnoseProcess {
 
 function Show-Picker {
     $devs = @($script:State.Devices)
-    $usbPreset = Find-UsbPreset
-    if ($usbPreset) {
+    $allUsb = Get-AllUsbCandidates
+    $usbItems = @()
+    foreach ($cand in $allUsb) {
         $bleNameCandidate = ''
         if ($devs.Count -gt 0 -and $devs[0].Name) { $bleNameCandidate = $devs[0].Name }
         elseif ($script:State.Name) { $bleNameCandidate = $script:State.Name }
-        $usbFriendlyName = Get-UsbDeviceDisplayName -Preset $usbPreset -BleName $bleNameCandidate
+        $usbFriendlyName = Get-UsbDeviceDisplayName -Preset $cand -BleName $bleNameCandidate
+        $isCurrentListening = ($script:UsbWorker -and $script:ActivePreset -and ($script:ActivePreset.Vid -eq $cand.Vid) -and ($script:ActivePreset.Pid -eq $cand.Pid))
+        $lvl = if ($isCurrentListening -and $script:Usb.Level -ge 0) { $script:Usb.Level }
+               elseif ($script:Cfg.UsbVid -eq $cand.Vid -and $script:Cfg.LastUsbLevel -ge 0) { [int]$script:Cfg.LastUsbLevel }
+               else { -1 }
+        $onlineState = ($isCurrentListening -and [bool]$script:Usb.Online)
         $usbDev = @{
             IsUsb = $true
-            Name = ('[2.4G] ' + $usbFriendlyName)
+            Name = ('[2.4G] {0} ({1}:{2})' -f $usbFriendlyName, $cand.Vid, $cand.Pid)
             FriendlyName = $usbFriendlyName
-            Level = if ($script:Usb.Level -ge 0) { $script:Usb.Level } else { -1 }
-            Online = [bool]$script:Usb.Online
-            Preset = $usbPreset
-            Id = ('USB:' + $usbPreset.Vid + ':' + $usbPreset.Pid)
+            Level = $lvl
+            Online = $onlineState
+            Preset = $cand
+            Id = ('USB:' + $cand.Vid + ':' + $cand.Pid)
         }
-        $devs = @($usbDev) + @($devs)
+        $usbItems += $usbDev
     }
+    $devs = @($usbItems) + @($devs)
     $skipList = @($script:State.Skipped)
     $empty = ($devs.Count -eq 0)
 
@@ -1691,6 +1718,7 @@ function Show-Picker {
                 $script:Cfg.UsbLinkIndex = $d.Preset.LinkIdx
                 Save-Config
                 Write-Log ('PICK-USB ' + $d.Preset.Brand + ' ' + $d.Preset.Vid + ':' + $d.Preset.Pid + ' upage=0x' + $d.Preset.UsagePage)
+                $script:ActivePreset = $d.Preset
                 Start-UsbListener
                 Update-Tray
             }
