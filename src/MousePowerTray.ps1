@@ -900,8 +900,17 @@ $script:UsbPresets = @(
     @{ Brand = 'AJAZZ';    Vid = '0C45'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
     # 红魔 RedMagic (电竞无线系列)
     @{ Brand = 'RedMagic'; Vid = '3537'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
-    # 双飞燕 A4Tech / 血手幽灵
+    # 双飞燕 A4Tech / 血手幽灵 Bloody / 飞时代 Fstyler (09DA 官方, 25A7 卓荣办公, 18F8 宇瀚)
     @{ Brand = 'A4Tech';   Vid = '09DA'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
+    @{ Brand = 'A4Tech';   Vid = '09DA'; UsagePage = 'FF01'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
+    @{ Brand = 'A4Tech';   Vid = '09DA'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
+    @{ Brand = 'A4Tech';   Vid = '09DA'; UsagePage = 'FFA0'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
+    @{ Brand = 'A4Tech';   Vid = '25A7'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
+    @{ Brand = 'A4Tech';   Vid = '25A7'; UsagePage = 'FFA0'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
+    @{ Brand = 'A4Tech';   Vid = '25A7'; UsagePage = 'FF01'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
+    @{ Brand = 'A4Tech';   Vid = '25A7'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
+    @{ Brand = 'A4Tech';   Vid = '18F8'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
+    @{ Brand = 'A4Tech';   Vid = '18F8'; UsagePage = 'FF01'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
 )
 $script:ActivePreset = $null
 
@@ -1239,10 +1248,13 @@ function Apply-ProbeResult {
 
         if (-not $script:Cfg.DeviceId) {
             $pick = $null
-            if ($devs.Count -eq 1) { $pick = $devs[0] }
-            elseif ($devs.Count -gt 1) {
-                $online = @($devs | Where-Object { $_.Online })
-                if ($online.Count -eq 1) { $pick = $online[0] }
+            # 如果系统当前插着 2.4G 接收器，不要自动绑定离线蓝牙设备
+            if (-not $script:UsbWorker) {
+                if ($devs.Count -eq 1 -and $devs[0].Online) { $pick = $devs[0] }
+                elseif ($devs.Count -gt 1) {
+                    $online = @($devs | Where-Object { $_.Online })
+                    if ($online.Count -eq 1) { $pick = $online[0] }
+                }
             }
             if ($pick) {
                 $script:Cfg.DeviceId = $pick.Id
@@ -1250,7 +1262,7 @@ function Apply-ProbeResult {
                 Save-Config
                 Write-Log ('AUTO-PICK ' + $pick.Id)
             }
-            elseif ($devs.Count -gt 1) {
+            elseif ($devs.Count -gt 1 -and -not $script:UsbWorker) {
                 Write-Log 'MULTI-DEVICE -> picker'
                 Show-Picker
                 return
@@ -1344,9 +1356,12 @@ function Get-DisplayState {
     $usbReady = $script:UsbWorker -and $script:Usb.HasData
     $nmBle = if ($s.Name) { $s.Name } else { $script:AppName }
     $presetName = if ($script:ActivePreset) { $script:ActivePreset.Brand + ' 鼠标' } else { '' }
-    $nmUsb = if ($script:Cfg.DeviceName) { $script:Cfg.DeviceName } elseif ($presetName) { $presetName } elseif ($s.Name) { $s.Name } else { $script:AppName }
+    $nmUsb = if ($script:ActivePreset -and $script:ActivePreset.ProductName) { $script:ActivePreset.ProductName }
+             elseif ($presetName) { $presetName }
+             elseif ($script:Cfg.DeviceName -and -not $script:Cfg.DeviceId) { $script:Cfg.DeviceName }
+             else { '2.4G 无线鼠标' }
 
-    # 1. 优先展示在线设备
+    # 1. 优先展示真正处于活跃连接的设备
     if ($bleOnline) {
         return @{ Mode = 'ble'; Online = $true; Level = $s.Level; LastLevel = $s.LastLevel
                   Name = $nmBle; Idle = $false; At = $s.LastGoodUpdate }
@@ -1356,33 +1371,25 @@ function Get-DisplayState {
                   LastLevel = $script:Usb.Level; Name = $nmUsb; Idle = [bool]$script:Usb.Idle; At = $script:Usb.At }
     }
 
-    # 2. 用户在配置中明确指定了 2.4G 接收器通道：主用 2.4G，离线时不被蓝牙历史电量覆盖
-    if ($script:Cfg.UsbUsagePage -and $script:UsbWorker) {
+    # 2. 核心优先：系统当前插入了 2.4G 接收器（正在监听）且蓝牙离线时，
+    # 绝对优先呈现 2.4G 接收器，坚决不被历史离线蓝牙电量霸占覆盖！
+    if ($script:UsbWorker) {
         $lv = if ($script:Usb.HasData) { $script:Usb.Level }
               elseif ($script:Cfg.LastUsbLevel -ge 0) { [int]$script:Cfg.LastUsbLevel }
               else { -1 }
-        return @{ Mode = 'usb'; Online = $false; Level = $lv; LastLevel = $lv
-                  Name = $nmUsb; Idle = $false; At = $script:Usb.At }
+        return @{ Mode = 'usb'; Online = [bool]$script:Usb.Online; Level = $lv; LastLevel = $lv
+                  Name = $nmUsb; Idle = [bool]$script:Usb.Idle; At = $script:Usb.At }
     }
 
-    # 3. 自动模式（都离线时）：比较哪个设备是最近活跃的
+    # 3. 只有当 2.4G 接收器完全拔掉时，才回退显示蓝牙离线历史记录
     $hasBleLast = ($s.LastLevel -ge 0)
-    $hasUsbLast = ($usbReady -and $script:Usb.Level -ge 0)
-
-    if ($hasUsbLast -and (-not $hasBleLast -or ($script:Usb.At -and $s.LastSeen -and $script:Usb.At -ge $s.LastSeen))) {
-        return @{ Mode = 'usb'; Online = $false; Level = $script:Usb.Level
-                  LastLevel = $script:Usb.Level; Name = $nmUsb; Idle = [bool]$script:Usb.Idle; At = $script:Usb.At }
-    }
     if ($hasBleLast) {
         return @{ Mode = 'ble'; Online = $false; Level = $s.LastLevel; LastLevel = $s.LastLevel
                   Name = $nmBle; Idle = $false; At = $s.LastGoodUpdate }
     }
-    if ($script:UsbWorker -and $script:Cfg.LastUsbLevel -ge 0) {
-        return @{ Mode = 'usb'; Online = $false; Level = [int]$script:Cfg.LastUsbLevel; LastLevel = [int]$script:Cfg.LastUsbLevel
-                  Name = $nmUsb; Idle = $false; At = $null }
-    }
-    return @{ Mode = $s.Mode; Online = $false; Level = $s.LastLevel; LastLevel = $s.LastLevel
-              Name = $nmBle; Idle = $false; At = $s.LastGoodUpdate }
+
+    return @{ Mode = 'none'; Online = $false; Level = -1; LastLevel = -1
+              Name = $script:AppName; Idle = $false; At = $null }
 }
 
 function Update-Tray {
