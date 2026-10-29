@@ -677,7 +677,7 @@ public static class HidBat
                     if (!SetupDiGetDeviceInterfaceDetailX(set, ref did, buf, need, out need, ref devInfo)) continue;
                     // DevicePath 偏移随位数变化，两种布局都试一次，认 \?\ 开头的那份
                     string path = Marshal.PtrToStringUni(new IntPtr(buf.ToInt64() + 8));
-                    if (string.IsNullOrEmpty(path) || !path.StartsWith("\\?\"))
+                    if (string.IsNullOrEmpty(path) || path.IndexOf(@"\\?\") < 0)
                         path = Marshal.PtrToStringUni(new IntPtr(buf.ToInt64() + 4));
                     if (string.IsNullOrEmpty(path)) continue;
 
@@ -916,12 +916,18 @@ function Update-UsbState {
     # 帧格式做成可配置的：换一个品牌的接收器时，多数情况只要改
     # UsbFrameType / UsbLevelIndex / UsbLinkIndex 就能用，不必改代码。
     $typeWant = -1
-    if ($script:Cfg.UsbFrameType) {
-        try { $typeWant = [Convert]::ToInt32($script:Cfg.UsbFrameType, 16) } catch { $typeWant = -1 }
+    $frameTypeStr = if ($script:Cfg.UsbFrameType) { $script:Cfg.UsbFrameType }
+                    elseif ($script:ActivePreset -and $script:ActivePreset.FrameType) { $script:ActivePreset.FrameType }
+                    else { '' }
+    if ($frameTypeStr -and $frameTypeStr -ne 'HIDPP') {
+        try { $typeWant = [Convert]::ToInt32($frameTypeStr, 16) } catch { $typeWant = -1 }
     }
-    $lvIdx = 3; $lkIdx = 2
-    try { if ($null -ne $script:Cfg.UsbLevelIndex) { $lvIdx = [int]$script:Cfg.UsbLevelIndex } } catch { }
-    try { if ($null -ne $script:Cfg.UsbLinkIndex) { $lkIdx = [int]$script:Cfg.UsbLinkIndex } } catch { }
+    $lvIdx = if ($null -ne $script:Cfg.UsbLevelIndex) { [int]$script:Cfg.UsbLevelIndex }
+             elseif ($script:ActivePreset -and $null -ne $script:ActivePreset.LevelIdx) { [int]$script:ActivePreset.LevelIdx }
+             else { 3 }
+    $lkIdx = if ($null -ne $script:Cfg.UsbLinkIndex) { [int]$script:Cfg.UsbLinkIndex }
+             elseif ($script:ActivePreset -and $null -ne $script:ActivePreset.LinkIdx) { [int]$script:ActivePreset.LinkIdx }
+             else { 2 }
 
     foreach ($f in $frames) {
         # 罗技 HID++ 专用高层帧处理
@@ -1204,17 +1210,26 @@ function Get-DisplayState {
                   LastLevel = $script:Usb.Level; Name = $nmUsb; Idle = [bool]$script:Usb.Idle; At = $script:Usb.At }
     }
 
-    # 2. 都断开时，比较哪种模式是最近活跃的（避免 2.4G 接收器插着就永远遮蔽蓝牙断连电量）
+    # 2. 用户在配置中明确指定了 2.4G 接收器通道：主用 2.4G，离线时不被蓝牙历史电量覆盖
+    if ($script:Cfg.UsbUsagePage -and $script:UsbWorker) {
+        $lv = if ($script:Usb.HasData) { $script:Usb.Level }
+              elseif ($script:Cfg.LastUsbLevel -ge 0) { [int]$script:Cfg.LastUsbLevel }
+              else { -1 }
+        return @{ Mode = 'usb'; Online = $false; Level = $lv; LastLevel = $lv
+                  Name = $nmUsb; Idle = $false; At = $script:Usb.At }
+    }
+
+    # 3. 自动模式（都离线时）：比较哪个设备是最近活跃的
     $hasBleLast = ($s.LastLevel -ge 0)
     $hasUsbLast = ($usbReady -and $script:Usb.Level -ge 0)
 
-    if ($hasBleLast -and (-not $hasUsbLast -or ($s.LastSeen -and $script:Usb.At -and $s.LastSeen -ge $script:Usb.At))) {
-        return @{ Mode = 'ble'; Online = $false; Level = $s.LastLevel; LastLevel = $s.LastLevel
-                  Name = $nmBle; Idle = $false; At = $s.LastGoodUpdate }
-    }
-    if ($hasUsbLast) {
+    if ($hasUsbLast -and (-not $hasBleLast -or ($script:Usb.At -and $s.LastSeen -and $script:Usb.At -ge $s.LastSeen))) {
         return @{ Mode = 'usb'; Online = $false; Level = $script:Usb.Level
                   LastLevel = $script:Usb.Level; Name = $nmUsb; Idle = [bool]$script:Usb.Idle; At = $script:Usb.At }
+    }
+    if ($hasBleLast) {
+        return @{ Mode = 'ble'; Online = $false; Level = $s.LastLevel; LastLevel = $s.LastLevel
+                  Name = $nmBle; Idle = $false; At = $s.LastGoodUpdate }
     }
     if ($script:UsbWorker -and $script:Cfg.LastUsbLevel -ge 0) {
         return @{ Mode = 'usb'; Online = $false; Level = [int]$script:Cfg.LastUsbLevel; LastLevel = [int]$script:Cfg.LastUsbLevel
