@@ -149,106 +149,115 @@ function Get-StatusColor {
 function New-MouseBitmap {
     param([int]$Size, [int]$Level, [bool]$Online)
 
+    # 设计要点（16px 是主战场，32/48 只是加分）：
+    # 1. 只表达两件事 —— "这是鼠标" 和 "还剩多少电"。第二件事交给液面高度，
+    #    不再额外画亮线、刻度之类的装饰，小尺寸下全是噪点。
+    # 2. 仓底用中性浅灰而不是深色：深色任务栏上要能看见整只鼠标的轮廓，
+    #    浅色任务栏上靠深色描边勾边。
+    # 3. 渐变只在同一色系内做明度差，不跨色相（之前青→蓝那种看着像 RGB 灯）。
+    # 4. 滚轮和按键缝只在 >= 24px 时画，16px 下那两笔只会糊成一团。
     $bmp = New-Object System.Drawing.Bitmap($Size, $Size, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
     $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
     $g.Clear([System.Drawing.Color]::Transparent)
 
     $s = [single]$Size
-    # 扩大鼠标外廓至 76% 宽度，极大提升 16x16 / 32x32 托盘下的可见性与饱满度
-    $x0 = [single]([math]::Round($s * 0.12))
-    $x1 = [single]([math]::Round($s * 0.88))
-    $y0 = [single]([math]::Round($s * 0.05))
-    $y1 = [single]([math]::Round($s * 0.95))
+    $lvl = [math]::Max(0, [math]::Min(100, $Level))
+    $low = if ($script:Cfg -and $script:Cfg.LowPercent) { [int]$script:Cfg.LowPercent } else { 15 }
+    $detail = ($Size -ge 24)
+
+    # 鼠标外廓：收窄成竖长剪影。太宽会读成"电池"，收窄 + 顶部按键线才认得出是鼠标
+    $x0 = [single]([math]::Round($s * 0.235))
+    $x1 = [single]([math]::Round($s * 0.765))
+    $y0 = [single]([math]::Round($s * 0.035))
+    $y1 = [single]([math]::Round($s * 0.965))
     $w = $x1 - $x0
     $h = $y1 - $y0
-    $radius = [single]($w * 0.46)
-    $path = Get-RoundPath $x0 $y0 $w $h $radius
+    if ($w -lt 3) { $w = 3 }
+    if ($h -lt 3) { $h = 3 }
+    $path = Get-RoundPath $x0 $y0 $w $h ($w * 0.50)
 
-    $low = if ($script:Cfg -and $script:Cfg.LowPercent) { $script:Cfg.LowPercent } else { 15 }
-    $lvl = [math]::Max(0, [math]::Min(100, $Level))
-    $fillTop = $y1 - ($h * ($lvl / 100.0))
-
-    # 电竞风：双色渐变流光与专属暗色仓底
-    if (-not $Online -or $Level -lt 0) {
-        $cTop = [System.Drawing.Color]::FromArgb(115, 125, 140)
-        $cBot = [System.Drawing.Color]::FromArgb(65, 72, 85)
-        $cCap = [System.Drawing.Color]::FromArgb(150, 160, 175)
-        $bgTank = [System.Drawing.Color]::FromArgb(35, 40, 48)
+    # 配色：同色系上下明度差，饱和度收一档
+    $offline = (-not $Online -or $Level -lt 0)
+    if ($offline) {
+        $cTop = [System.Drawing.Color]::FromArgb(146, 154, 168)
+        $cBot = [System.Drawing.Color]::FromArgb(110, 118, 132)
+        $shell = [System.Drawing.Color]::FromArgb(178, 185, 197)
     }
     elseif ($Level -le $low) {
-        $cTop = [System.Drawing.Color]::FromArgb(255, 30, 70)
-        $cBot = [System.Drawing.Color]::FromArgb(210, 0, 40)
-        $cCap = [System.Drawing.Color]::FromArgb(255, 120, 150)
-        $bgTank = [System.Drawing.Color]::FromArgb(50, 20, 26)
+        $cTop = [System.Drawing.Color]::FromArgb(255, 106, 92)
+        $cBot = [System.Drawing.Color]::FromArgb(214, 52, 48)
+        $shell = [System.Drawing.Color]::FromArgb(182, 188, 200)
     }
     elseif ($Level -le 40) {
-        $cTop = [System.Drawing.Color]::FromArgb(255, 205, 0)
-        $cBot = [System.Drawing.Color]::FromArgb(255, 90, 0)
-        $cCap = [System.Drawing.Color]::FromArgb(255, 240, 120)
-        $bgTank = [System.Drawing.Color]::FromArgb(48, 38, 20)
+        $cTop = [System.Drawing.Color]::FromArgb(255, 194, 75)
+        $cBot = [System.Drawing.Color]::FromArgb(226, 148, 28)
+        $shell = [System.Drawing.Color]::FromArgb(182, 188, 200)
     }
     else {
-        $cTop = [System.Drawing.Color]::FromArgb(0, 255, 200)
-        $cBot = [System.Drawing.Color]::FromArgb(0, 140, 255)
-        $cCap = [System.Drawing.Color]::FromArgb(170, 255, 240)
-        $bgTank = [System.Drawing.Color]::FromArgb(20, 36, 45)
+        $cTop = [System.Drawing.Color]::FromArgb(56, 214, 160)
+        $cBot = [System.Drawing.Color]::FromArgb(28, 160, 126)
+        $shell = [System.Drawing.Color]::FromArgb(182, 188, 200)
     }
 
-    # 绘制高对比度背景仓
-    $bTank = New-Object System.Drawing.SolidBrush($bgTank)
-    $g.FillPath($bTank, $path)
-    $bTank.Dispose()
+    # 外壳（未填充部分）
+    $bShell = New-Object System.Drawing.SolidBrush($shell)
+    $g.FillPath($bShell, $path)
+    $bShell.Dispose()
 
-    # 绘制流光液面与发光波峰线
+    # 液面：从底部往上，不加亮线，靠颜色边界自然分层
     if ($lvl -gt 0) {
-        $fillH = ($y1 - $fillTop) + 0.5
-        $rectFill = New-Object System.Drawing.RectangleF($x0, $fillTop, $w, $fillH)
-        $lgb = New-Object System.Drawing.Drawing2D.LinearGradientBrush (New-Object System.Drawing.PointF($x0, $fillTop)), (New-Object System.Drawing.PointF($x0, $y1)), $cTop, $cBot
+        $fillTop = $y1 - ($h * ($lvl / 100.0))
+        $fillH = ($y1 - $fillTop)
+        $minFill = [single]([math]::Max(1.5, $s * 0.09))
+        if ($fillH -lt $minFill) { $fillH = $minFill; $fillTop = $y1 - $minFill }
+        $pTop = New-Object System.Drawing.PointF($x0, [single]$fillTop)
+        $pBot = New-Object System.Drawing.PointF($x0, [single]$y1)
+        $lgb = New-Object System.Drawing.Drawing2D.LinearGradientBrush($pTop, $pBot, $cTop, $cBot)
         $g.SetClip($path)
-        $g.FillRectangle($lgb, $rectFill)
-        if ($lvl -lt 100) {
-            $penCap = New-Object System.Drawing.Pen($cCap, [single]1.0)
-            $g.DrawLine($penCap, $x0, $fillTop, $x1, $fillTop)
-            $penCap.Dispose()
-        }
+        $g.FillRectangle($lgb, $x0, [single]$fillTop, $w, [single]$fillH)
         $g.ResetClip()
         $lgb.Dispose()
     }
 
-    # 双层边缘光圈：外层微光亮边（浅色/暗黑任务栏极佳适应） + 内层硬核防混线
-    $outGlowColor = if ($Online) { [System.Drawing.Color]::FromArgb(140, 220, 240, 255) } else { [System.Drawing.Color]::FromArgb(80, 180, 190, 200) }
-    $penOut = New-Object System.Drawing.Pen($outGlowColor, [single]1.0)
-    $penIn = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(18, 20, 24), [single]1.4)
-    $g.DrawPath($penOut, $path)
-    $g.DrawPath($penIn, $path)
-    $penOut.Dispose()
-    $penIn.Dispose()
+    # 描边：深色勾轮廓，浅色任务栏上也能立住
+    $edgeW = [single]([math]::Max(1.0, [math]::Round($s * 0.075)))
+    $penEdge = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(38, 43, 54), $edgeW)
+    $penEdge.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+    $g.DrawPath($penEdge, $path)
+    $penEdge.Dispose()
 
-    # 机械滚轮与中缝刻线
-    $darkColor = [System.Drawing.Color]::FromArgb(15, 18, 22)
-    $wheelW = [single]([math]::Max(2.0, [math]::Round($s * 0.16)))
-    $wheelH = [single]([math]::Max(3.0, [math]::Round($s * 0.22)))
-    $wheelX = [single]($s * 0.5 - $wheelW / 2.0)
-    $wheelY = [single]($y0 + $h * 0.12)
-    $wheelPath = Get-RoundPath $wheelX $wheelY $wheelW $wheelH ($wheelW / 2.0)
+    # 顶部按键分界线：所有尺寸都保留 —— 这一笔是 16px 下"鼠标"与"电池"的唯一区别
+    $penSplit = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(38, 43, 54),
+        [single]([math]::Max(1.0, [math]::Round($s * 0.055))))
+    $splitY = [single]($y0 + $h * 0.34)
+    $g.DrawLine($penSplit, $x0, $splitY, $x1, $splitY)
+    $penSplit.Dispose()
 
-    $bWheel = New-Object System.Drawing.SolidBrush($darkColor)
-    $g.FillPath($bWheel, $wheelPath)
-    $penWheelRim = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(70, 255, 255, 255), [single]0.8)
-    $g.DrawPath($penWheelRim, $wheelPath)
+    # 大尺寸才补细节：滚轮凹槽 + 中缝
+    if ($detail) {
+        $dark = [System.Drawing.Color]::FromArgb(48, 54, 66)
+        $wheelW = [single]([math]::Round($s * 0.115))
+        $wheelH = [single]([math]::Round($s * 0.15))
+        if ($wheelW -lt 2) { $wheelW = 2 }
+        if ($wheelH -lt 3) { $wheelH = 3 }
+        $wheelX = [single]($s * 0.5 - $wheelW / 2.0)
+        $wheelY = [single]($y0 + $h * 0.11)
+        $wheelPath = Get-RoundPath $wheelX $wheelY $wheelW $wheelH ($wheelW / 2.0)
+        $bWheel = New-Object System.Drawing.SolidBrush($dark)
+        $g.FillPath($bWheel, $wheelPath)
+        $bWheel.Dispose()
+        $penSeam = New-Object System.Drawing.Pen($dark, [single]([math]::Max(1.0, $s * 0.045)))
+        $g.DrawLine($penSeam, [single]($s * 0.5), [single]($wheelY + $wheelH + $s * 0.015),
+                    [single]($s * 0.5), [single]($y0 + $h * 0.325))
+        $penSeam.Dispose()
+        $wheelPath.Dispose()
+    }
 
-    $penSeam = New-Object System.Drawing.Pen($darkColor, [single]1.0)
-    $g.DrawLine($penSeam, [single]($s * 0.5), [single]($wheelY + $wheelH + 0.5), [single]($s * 0.5), [single]($y0 + $h * 0.40))
-
-    $bWheel.Dispose()
-    $penWheelRim.Dispose()
-    $penSeam.Dispose()
-    $wheelPath.Dispose()
     $path.Dispose()
     $g.Dispose()
-
     return $bmp
 }
 
