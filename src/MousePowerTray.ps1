@@ -880,8 +880,9 @@ $script:UsbPresets = @(
     # 瓦尔基里 VALKYRIE (VK M3 Series 实测 A8A5:2255 方案，00 AA 协议)
     @{ Brand = 'VALKYRIE'; Vid = 'A8A5'; Pid = '2255'; UsagePage = 'FF01'; FrameType = 'AA'; LevelIdx = 5;  LinkIdx = 8 }
     # 瓦尔基里 VALKYRIE (VK M3 / M1 / M2 / M5 备用方案)
-    @{ Brand = 'VALKYRIE'; Vid = '248A'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
-    @{ Brand = 'VALKYRIE'; Vid = '248A'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
+    # 248A 是共用 VID：瓦尔基里和多彩都用，只能靠产品名区分（NamePattern）
+    @{ Brand = 'VALKYRIE'; Vid = '248A'; NamePattern = 'VK|Valkyrie|瓦尔基里'; UsagePage = 'FF02'; FrameType = 'D1'; LevelIdx = 3; LinkIdx = 2 }
+    @{ Brand = 'VALKYRIE'; Vid = '248A'; NamePattern = 'VK|Valkyrie|瓦尔基里'; UsagePage = 'FF00'; FrameType = '';   LevelIdx = 3; LinkIdx = -1 }
     @{ Brand = 'VALKYRIE'; Vid = '249A'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
     @{ Brand = 'VALKYRIE'; Vid = '249A'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
     # VGN / ATK (蜻蜓 F1 系列 / ATK A9 / 烈空等)
@@ -902,8 +903,8 @@ $script:UsbPresets = @(
     @{ Brand = 'HECATE';   Vid = '2E8A'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
     @{ Brand = 'HECATE';   Vid = '2E8A'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
     # 多彩 DeLUX (M800 Pro / M618 人体工学系列)
-    @{ Brand = 'DeLUX';    Vid = '248A'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
-    @{ Brand = 'DeLUX';    Vid = '248A'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
+    @{ Brand = 'DeLUX';    Vid = '248A'; NamePattern = 'DeLUX|Delux|多彩';       UsagePage = 'FF00'; FrameType = '';   LevelIdx = 3; LinkIdx = -1 }
+    @{ Brand = 'DeLUX';    Vid = '248A'; NamePattern = 'DeLUX|Delux|多彩';       UsagePage = 'FF02'; FrameType = 'D1'; LevelIdx = 3; LinkIdx = 2 }
     # 黑爵 AJAZZ (AJ199 / AJ139 / AJ159 等)
     @{ Brand = 'AJAZZ';    Vid = '0C45'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
     @{ Brand = 'AJAZZ';    Vid = '0C45'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = 3;  LinkIdx = -1 }
@@ -924,6 +925,30 @@ $script:UsbPresets = @(
 $script:ActivePreset = $null
 
 # 动态全自适应 2.4G 扫描引擎：直接提取真实插入的物理 USB HID 节点的 VID/PID/UsagePage
+function Find-PresetFor {
+    # 按 VID / PID / UsagePage / 产品名 找匹配的预设。
+    # NamePattern 是给"共用 VID"的厂商准备的（248A 同时是瓦尔基里和多彩）——
+    # 产品名里能看出品牌就按名字定，看不出来（多数接收器只报 "Wireless-Receiver"）
+    # 就退回第一条同 VID 的预设，至少帧参数是对的，只是品牌名可能不准。
+    # 参数不能叫 $Pid：变量名不区分大小写，$Pid 会撞上只读的自动变量 $PID（进程号），
+    # 赋值直接失败，函数就永远返回 $null。
+    param([string]$Vid, [string]$ProductId, [string]$Upage, [string]$Product)
+    if (-not $Vid) { return $null }
+    $loose = $null
+    foreach ($p in $script:UsbPresets) {
+        if ($p.Vid.ToUpperInvariant() -ne $Vid.ToUpperInvariant()) { continue }
+        if ($p.Pid -and $p.Pid.ToUpperInvariant() -ne $ProductId.ToUpperInvariant()) { continue }
+        if ($p.UsagePage -and $p.UsagePage.ToUpperInvariant() -ne $Upage.ToUpperInvariant()) { continue }
+        if ($p.NamePattern) {
+            if ($Product -and $Product -match ('(?i)' + $p.NamePattern)) { return $p }
+            if (-not $loose) { $loose = $p }
+            continue
+        }
+        return $p
+    }
+    return $loose
+}
+
 function Get-AllUsbCandidates {
     # 动态扫描：直接读真实插入的 USB HID 节点，不依赖任何硬编码白名单。
     # 关键一步是先按 VID:PID 把接口分组 —— 只有"同一物理设备上既有标准鼠标接口、
@@ -980,16 +1005,7 @@ function Get-AllUsbCandidates {
             $vid = $r.Vid; $devPid = $r.Pid; $upage = $r.Upage
 
             # 1. 优先匹配内置预设（罗技 HID++ / 专用帧头等）
-            $matchedPreset = $null
-            foreach ($p in $script:UsbPresets) {
-                if ($p.Vid.ToUpperInvariant() -eq $vid.ToUpperInvariant()) {
-                    if ($p.Pid -and $p.Pid.ToUpperInvariant() -ne $devPid.ToUpperInvariant()) { continue }
-                    if (-not $p.UsagePage -or $p.UsagePage.ToUpperInvariant() -eq $upage.ToUpperInvariant()) {
-                        $matchedPreset = $p
-                        break
-                    }
-                }
-            }
+            $matchedPreset = Find-PresetFor -Vid $vid -ProductId $devPid -Upage $upage -Product $prod
 
             $brand = if ($matchedPreset) { $matchedPreset.Brand }
                      elseif ($prod -match '(?i)VK|Valkyrie') { 'VALKYRIE' }
@@ -1022,13 +1038,26 @@ function Get-AllUsbCandidates {
     return @($results)
 }
 
+function Get-UsbCandidateList {
+    param([switch]$Refresh)
+    if ($Refresh -or @($script:UsbCandList).Count -eq 0) {
+        $raw = @(Get-AllUsbCandidates)
+        # 排序：命中预设的优先；同为预设时取 in 报告更短的那条
+        # （状态帧普遍比查询/控制通道短，AULA 的 FF02=33 字节就比 FF01=64 更像状态帧）
+        $script:UsbCandList = @($raw | Sort-Object `
+            @{ Expression = { if ($_.IsPreset) { 0 } else { 1 } } }, `
+            @{ Expression = { $_.InLen } })
+        if ($script:UsbCandIdx -ge $script:UsbCandList.Count) { $script:UsbCandIdx = 0 }
+    }
+    return $script:UsbCandList
+}
+
 function Find-UsbPreset {
-    $candidates = Get-AllUsbCandidates
-    if ($candidates.Count -eq 0) { return $null }
-    # 优先返回命中已知优化预设的节点，若无则直接采用扫描到的第一个具备私有通道的有效 USB 硬件节点
-    $presetHit = @($candidates | Where-Object { $_.IsPreset }) | Select-Object -First 1
-    if ($presetHit) { return $presetHit }
-    return $candidates[0]
+    $list = Get-UsbCandidateList
+    if (@($list).Count -eq 0) { return $null }
+    $i = $script:UsbCandIdx
+    if ($i -lt 0 -or $i -ge @($list).Count) { $i = 0 }
+    return @($list)[$i]
 }
 
 function Start-UsbListener {
@@ -1092,6 +1121,8 @@ function Start-UsbListener {
             # 接收器成功开启后台监听；等待收到真实鼠标无线帧后再置 Online，避免启动时压制在线蓝牙
             $script:Usb.Online = $false
             $script:Usb.At = Get-Date
+            $script:Usb.Frames = 0                 # 本轮通道收到的帧数，用于判断要不要换通道
+            $script:UsbNoFrameSince = Get-Date
             if ($script:Cfg.LastUsbLevel -ge 0) {
                 $script:Usb.Level = [int]$script:Cfg.LastUsbLevel
                 $script:Usb.HasData = $true
@@ -1163,6 +1194,7 @@ function Update-UsbState {
                     if (-not $script:Usb.HasData -or $script:Usb.Level -ne $lv) { $changed = $true }
                     $script:Usb.HasData = $true
                     $script:Usb.Level = $lv
+                    $script:Usb.Estimated = $false
                     $script:Usb.At = Get-Date
                     if (-not $script:Usb.Online) { $changed = $true }
                     $script:Usb.Online = $true
@@ -1178,6 +1210,7 @@ function Update-UsbState {
 
         $hex, $ts = $f -split '\|'
         if ($hex.Length -lt 4) { continue }
+        $script:Usb.Frames++
         $b = @()
         for ($i = 0; $i -lt $hex.Length; $i += 2) { $b += [Convert]::ToByte($hex.Substring($i, 2), 16) }
         if ($b.Count -lt 2) { continue }
@@ -1190,6 +1223,7 @@ function Update-UsbState {
 
         $lv = -1
         $link = 1
+        $isEstimated = $false
 
         if ($typeWant -ge 0 -and $b.Count -gt 1 -and $b[1] -eq $typeWant -and $lvIdx -ge 0 -and $lvIdx -lt $b.Count) {
             # 命中指定厂商帧类型（如 00 D1 ... 或 00 AA ...）
@@ -1210,17 +1244,22 @@ function Update-UsbState {
             if ($lkIdx -ge 0 -and $lkIdx -lt $b.Count) { $link = [int]$b[$lkIdx] }
         }
         else {
-            # 自适应嗅探：在非首字节中寻找合法电量候选（1..100）
+            # 最后手段：没有任何已知规则能解释这一帧，就在非首字节里找 1..100 的值。
+            # 这纯属猜测（0x11=17 这种常量字节也会中招），所以结果标记成"推测值"，
+            # UI 上会显示成 ~17%，不跟真实读数混为一谈。
+            $sniffIdx = -1
             for ($idx = 1; $idx -lt [math]::Min(8, $b.Count); $idx++) {
                 $val = [int]$b[$idx]
                 if ($val -ge 1 -and $val -le 100) {
                     if ($lv -lt 0 -or ($val -gt 5 -and $lv -le 5)) {
                         $lv = $val
+                        $sniffIdx = $idx
                     }
                 }
             }
             if ($lv -ge 0) {
-                Write-Log ('USB-SNIFF-LEVEL level={0}%' -f $lv)
+                $isEstimated = $true
+                Write-Log ('USB-SNIFF-LEVEL level={0}% from byte[{1}] (guessed)' -f $lv, $sniffIdx)
             }
         }
 
@@ -1241,14 +1280,38 @@ function Update-UsbState {
         }
 
         if ($lv -ge 0) {
-            if (-not $script:Usb.HasData -or $script:Usb.Level -ne $lv) { $changed = $true }
+            if (-not $script:Usb.HasData -or $script:Usb.Level -ne $lv -or $script:Usb.Estimated -ne $isEstimated) { $changed = $true }
             $script:Usb.HasData = $true
             $script:Usb.Level = $lv
+            $script:Usb.Estimated = $isEstimated
             if ($script:Cfg.LastUsbLevel -ne $lv) { $script:Cfg.LastUsbLevel = $lv; Save-Config }
             # 若 2.4G 正在收到电量，而蓝牙此前处于在线，说明刚从蓝牙切过来，立刻触发核验加速切换
             if ($script:State.Online -and -not $script:PendingRefresh) {
                 $script:PendingRefresh = $true
             }
+        }
+    }
+
+    # 通道轮换：一个接收器常有多条 0xFFxx 通道，挑中的可能是查询通道（永远不回帧）。
+    # 只在"由预设库自动选中 + 本次启动后一帧都没收到"时轮换，且最多轮换 2 次。
+    # 等待时间取 60 秒是有讲究的：2.4G 鼠标可能空闲很久才推一帧（实测间隔 1~90 秒），
+    # 掐得太短会把本来正常的通道误判成死的。最多 2 次是为了保证轮完还能回到首选，
+    # 不会在两个通道之间无限来回。
+    if ($script:UsbWorker -and $script:Usb.Frames -eq 0 -and $script:UsbRotateCount -lt 2 -and
+        $script:ActivePreset -and $script:ActivePreset.IsPreset -and
+        @($script:UsbCandList).Count -gt 1) {
+        if (-not $script:UsbNoFrameSince) { $script:UsbNoFrameSince = Get-Date }
+        elseif (((Get-Date) - $script:UsbNoFrameSince).TotalSeconds -ge 60) {
+            $script:UsbNoFrameSince = Get-Date
+            $script:UsbRotateCount++
+            $script:UsbCandIdx = ($script:UsbCandIdx + 1) % @($script:UsbCandList).Count
+            $next = @($script:UsbCandList)[$script:UsbCandIdx]
+            Write-Log ('USB-CHANNEL-ROTATE #{0} -> {1}:{2} upage=0x{3}' -f
+                $script:UsbRotateCount, $next.Vid, $next.Pid, $next.UsagePage)
+            try { if ('HidBat' -as [type]) { [HidBat]::Stop() } } catch { }
+            $script:UsbWorker = $false
+            Start-UsbListener
+            return
         }
     }
 
@@ -1292,7 +1355,14 @@ $script:State = @{
 # 2.4G 接收器状态（独立于 BLE）
 $script:UsbWorker = $false
 $script:UsbTryAt = [datetime]::MinValue
-$script:Usb = @{ HasData = $false; Level = -1; Online = $false; At = $null; Idle = $false; IdleSince = $null }
+$script:Usb = @{ HasData = $false; Level = -1; Online = $false; At = $null; Idle = $false
+                  IdleSince = $null; Frames = 0; Estimated = $false }
+# 候选接收器通道队列：一个接收器常有多条 0xFFxx 通道，其中只有一条是状态帧。
+# 先按"预设命中优先、报告短的优先"排序，启动后长时间没帧就换下一条。
+$script:UsbCandList = @()
+$script:UsbCandIdx = 0
+$script:UsbNoFrameSince = $null
+$script:UsbRotateCount = 0
 $script:Worker = $null
 $script:WorkerHandle = $null
 $script:WorkerStart = [datetime]::MinValue
@@ -1570,13 +1640,14 @@ function Get-DisplayState {
               elseif ($script:Cfg.LastUsbLevel -ge 0) { [int]$script:Cfg.LastUsbLevel }
               else { -1 }
         return @{ Mode = 'usb'; Online = $true; Level = $lv
-                  LastLevel = $lv; Name = $nmUsb; Idle = [bool]$script:Usb.Idle; At = $script:Usb.At }
+                  LastLevel = $lv; Name = $nmUsb; Idle = [bool]$script:Usb.Idle; At = $script:Usb.At
+                  Estimated = [bool]$script:Usb.Estimated }
     }
 
     # 2. 蓝牙在线展示：鼠标处于蓝牙模式且无即时 2.4G 抢占时展示蓝牙
     if ($bleOnline) {
         return @{ Mode = 'ble'; Online = $true; Level = $s.Level; LastLevel = $s.LastLevel
-                  Name = $nmBle; Idle = $false; At = $s.LastGoodUpdate }
+                  Name = $nmBle; Idle = $false; At = $s.LastGoodUpdate; Estimated = $false }
     }
 
     # 3. 2.4G 常规活跃连接态（3秒以上但未超时）
@@ -1585,14 +1656,15 @@ function Get-DisplayState {
               elseif ($script:Cfg.LastUsbLevel -ge 0) { [int]$script:Cfg.LastUsbLevel }
               else { -1 }
         return @{ Mode = 'usb'; Online = $true; Level = $lv
-                  LastLevel = $lv; Name = $nmUsb; Idle = [bool]$script:Usb.Idle; At = $script:Usb.At }
+                  LastLevel = $lv; Name = $nmUsb; Idle = [bool]$script:Usb.Idle; At = $script:Usb.At
+                  Estimated = [bool]$script:Usb.Estimated }
     }
 
     # 3. 蓝牙曾连接但当前离线，若 2.4G 也没有活跃数据，优先保留历史蓝牙状态
     $hasBleLast = ($s.LastLevel -ge 0)
     if ($hasBleLast -and (-not $usbReady)) {
         return @{ Mode = 'ble'; Online = $false; Level = $s.LastLevel; LastLevel = $s.LastLevel
-                  Name = $nmBle; Idle = $false; At = $s.LastGoodUpdate }
+                  Name = $nmBle; Idle = $false; At = $s.LastGoodUpdate; Estimated = $false }
     }
 
     # 4. 2.4G 接收器插着（处于待机、休眠或离线态）
@@ -1601,12 +1673,13 @@ function Get-DisplayState {
               elseif ($script:Cfg.LastUsbLevel -ge 0) { [int]$script:Cfg.LastUsbLevel }
               else { -1 }
         return @{ Mode = 'usb'; Online = [bool]$script:Usb.Online; Level = $lv; LastLevel = $lv
-                  Name = $nmUsb; Idle = [bool]$script:Usb.Idle; At = $script:Usb.At }
+                  Name = $nmUsb; Idle = [bool]$script:Usb.Idle; At = $script:Usb.At
+                  Estimated = [bool]$script:Usb.Estimated }
     }
 
     if ($hasBleLast) {
         return @{ Mode = 'ble'; Online = $false; Level = $s.LastLevel; LastLevel = $s.LastLevel
-                  Name = $nmBle; Idle = $false; At = $s.LastGoodUpdate }
+                  Name = $nmBle; Idle = $false; At = $s.LastGoodUpdate; Estimated = $false }
     }
 
     return @{ Mode = 'none'; Online = $false; Level = -1; LastLevel = -1
@@ -1641,14 +1714,16 @@ function Update-Tray {
     }
 
     $tag = if ($mode -eq 'usb') { '（2.4G）' } else { '' }
-    if ($online) { $tip = '{0} · 电量 {1}%{2}' -f $nm, $level, $tag }
+    # 嗅探猜出来的数字要标清楚，别和实测值混在一起
+    $estTag = if ($d.Estimated) { '（推测）' } else { '' }
+    if ($online) { $tip = '{0} · 电量 {1}%{2}{3}' -f $nm, $level, $tag, $estTag }
     elseif ($lastLevel -ge 0) { $tip = '{0} · 已断开（最后 {1}%）' -f $nm, $lastLevel }
     else { $tip = '{0} · 未检测到设备' -f $script:AppName }
     if ($tip.Length -gt 60) { $tip = $tip.Substring(0, 60) }
     try { $script:NotifyIcon.Text = $tip } catch { }
 
     try {
-        if ($online) { $script:MenuHeader.Text = '  {0} · {1}%{2}' -f $nm, $level, $tag }
+        if ($online) { $script:MenuHeader.Text = '  {0} · {1}%{2}{3}' -f $nm, $level, $tag, $estTag }
         elseif ($lastLevel -ge 0) { $script:MenuHeader.Text = '  {0} · 已断开（最后 {1}%）' -f $nm, $lastLevel }
         elseif ($mode -eq 'none') { $script:MenuHeader.Text = '  未检测到可用设备' }
         else { $script:MenuHeader.Text = '  {0} · 已断开' -f $nm }
@@ -1730,7 +1805,8 @@ function Show-Picker {
     $lb.IntegralHeight = $false
     foreach ($d in $devs) {
         $state = if ($d.Online) { '已连接' } else { '未连接' }
-        $item = '{0}   —   {1}%   ({2})' -f $d.Name, $d.Level, $state
+        $lvText = if ($d.Level -lt 0) { '--' } else { '{0}%' -f $d.Level }
+        $item = '{0}   —   {1}   ({2})' -f $d.Name, $lvText, $state
         [void]$lb.Items.Add($item)
     }
     if ($lb.Items.Count -gt 0) { $lb.SelectedIndex = 0 }
@@ -1884,13 +1960,16 @@ function New-Popup {
         elseif ($modeTag -eq 'usb') {
             if (-not $online) { $modeText = '2.4G 接收器 · 已断开' }
             elseif ($d.Idle) { $modeText = '2.4G 接收器 · 待机' }
+            elseif ($d.Estimated) { $modeText = '2.4G 接收器 · 电量推测' }
             else { $modeText = '2.4G 接收器 · 已连接' }
         }
         else { $modeText = '未检测到设备' }
         $g.DrawString($modeText, $script:FntSub, $script:BrSub, [single]18, [single]38)
 
         # 百分比用原始读数判断：$level 已经被夹到 0，拿它判空会把"没数据"显示成 0%
-        $pctText = if ($d.Level -ge 0) { '{0}%' -f $d.Level } else { '--' }
+        $pctText = if ($d.Level -lt 0) { '--' }
+                   elseif ($d.Estimated) { '~{0}%' -f $d.Level }
+                   else { '{0}%' -f $d.Level }
         $sz = $g.MeasureString($pctText, $script:FntBig)
         $g.DrawString($pctText, $script:FntBig, $brAccent, [single](286 - $sz.Width), [single]10)
 
