@@ -169,10 +169,10 @@ function New-MouseBitmap {
     $detail = ($Size -ge 24)
 
     # 鼠标外廓：收窄成竖长剪影。太宽会读成"电池"，收窄 + 顶部按键线才认得出是鼠标
-    $x0 = [single]([math]::Round($s * 0.235))
-    $x1 = [single]([math]::Round($s * 0.765))
-    $y0 = [single]([math]::Round($s * 0.035))
-    $y1 = [single]([math]::Round($s * 0.965))
+    $x0 = [single]([math]::Round($s * 0.165))
+    $x1 = [single]([math]::Round($s * 0.835))
+    $y0 = [single]([math]::Round($s * 0.03))
+    $y1 = [single]([math]::Round($s * 0.97))
     $w = $x1 - $x0
     $h = $y1 - $y0
     if ($w -lt 3) { $w = 3 }
@@ -180,26 +180,47 @@ function New-MouseBitmap {
     $path = Get-RoundPath $x0 $y0 $w $h ($w * 0.50)
 
     # 配色：同色系上下明度差，饱和度收一档
+    # 霓虹配色：跨色相渐变，靠高饱和 + 明度落差造出"通电"的感觉
     $offline = (-not $Online -or $Level -lt 0)
     if ($offline) {
-        $cTop = [System.Drawing.Color]::FromArgb(146, 154, 168)
-        $cBot = [System.Drawing.Color]::FromArgb(110, 118, 132)
-        $shell = [System.Drawing.Color]::FromArgb(178, 185, 197)
+        $cTop = [System.Drawing.Color]::FromArgb(120, 130, 146)
+        $cBot = [System.Drawing.Color]::FromArgb(62, 70, 84)
+        $glow = [System.Drawing.Color]::FromArgb(150, 160, 176)
     }
     elseif ($Level -le $low) {
-        $cTop = [System.Drawing.Color]::FromArgb(255, 106, 92)
-        $cBot = [System.Drawing.Color]::FromArgb(214, 52, 48)
-        $shell = [System.Drawing.Color]::FromArgb(182, 188, 200)
+        $cTop = [System.Drawing.Color]::FromArgb(255, 46, 99)
+        $cBot = [System.Drawing.Color]::FromArgb(176, 0, 58)
+        $glow = [System.Drawing.Color]::FromArgb(255, 60, 110)
     }
     elseif ($Level -le 40) {
-        $cTop = [System.Drawing.Color]::FromArgb(255, 194, 75)
-        $cBot = [System.Drawing.Color]::FromArgb(226, 148, 28)
-        $shell = [System.Drawing.Color]::FromArgb(182, 188, 200)
+        $cTop = [System.Drawing.Color]::FromArgb(255, 200, 0)
+        $cBot = [System.Drawing.Color]::FromArgb(255, 84, 0)
+        $glow = [System.Drawing.Color]::FromArgb(255, 170, 30)
     }
     else {
-        $cTop = [System.Drawing.Color]::FromArgb(56, 214, 160)
-        $cBot = [System.Drawing.Color]::FromArgb(28, 160, 126)
-        $shell = [System.Drawing.Color]::FromArgb(182, 188, 200)
+        $cTop = [System.Drawing.Color]::FromArgb(0, 245, 208)
+        $cBot = [System.Drawing.Color]::FromArgb(0, 132, 255)
+        $glow = [System.Drawing.Color]::FromArgb(0, 220, 230)
+    }
+    # 玻璃仓用半透明近黑蓝：浅色任务栏上透出中灰（不会是个黑块），
+    # 深色任务栏上融进背景，靠发光描边勾出轮廓。离线时改用中灰，否则深底上看不见。
+    # 外壳取该电量色系的"暗版"而不是统一灰：
+    # 同一支图标里色调统一，浅色任务栏上也不会变成一块和液面对不上色的灰。
+    $shell = if ($offline) { [System.Drawing.Color]::FromArgb(255, 104, 112, 126) }
+             elseif ($Level -le $low) { [System.Drawing.Color]::FromArgb(255, 58, 17, 27) }
+             elseif ($Level -le 40) { [System.Drawing.Color]::FromArgb(255, 56, 42, 14) }
+             else { [System.Drawing.Color]::FromArgb(255, 16, 46, 56) }
+
+    # 外发光先画：后面填充不透明外壳和液面时会把内侧那半盖掉，只留下外圈光晕。
+    # 顺序反了的话，光晕的内半边会叠在深色外壳上，浅色任务栏里看着是一圈脏灰。
+    if ($Size -ge 24 -and -not $offline) {
+        foreach ($gl in @(@(3.4, 30), @(2.2, 56), @(1.4, 92))) {
+            $penG = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb([int]$gl[1], $glow),
+                [single]($s * 0.035 * [double]$gl[0]))
+            $penG.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+            $g.DrawPath($penG, $path)
+            $penG.Dispose()
+        }
     }
 
     # 外壳（未填充部分）
@@ -222,15 +243,24 @@ function New-MouseBitmap {
         $lgb.Dispose()
     }
 
-    # 描边：深色勾轮廓，浅色任务栏上也能立住
-    $edgeW = [single]([math]::Max(1.0, [math]::Round($s * 0.075)))
-    $penEdge = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(38, 43, 54), $edgeW)
+    # 液面顶部高光：一层半透明白线，让"液面"有反光感，而不是一块死色
+    if ($lvl -gt 0 -and $lvl -lt 100) {
+        $hiAlpha = if ($Size -ge 24) { 195 } else { 145 }
+        $penHi = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb($hiAlpha, 255, 255, 255),
+            [single]([math]::Max(1.0, $s * 0.035)))
+        $g.DrawLine($penHi, $x0, [single]($fillTop + 0.4), $x1, [single]($fillTop + 0.4))
+        $penHi.Dispose()
+    }
+
+    # 主描边用信号色本身：深色任务栏上是"发光边框"，浅色任务栏上也认得出轮廓
+    $edgeW = [single]([math]::Max(1.0, [math]::Round($s * 0.07)))
+    $penEdge = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb($(if ($offline) { 190 } else { 225 }), $glow), $edgeW)
     $penEdge.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
     $g.DrawPath($penEdge, $path)
     $penEdge.Dispose()
 
     # 顶部按键分界线：所有尺寸都保留 —— 这一笔是 16px 下"鼠标"与"电池"的唯一区别
-    $penSplit = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(38, 43, 54),
+    $penSplit = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(200, 8, 11, 16),
         [single]([math]::Max(1.0, [math]::Round($s * 0.055))))
     $splitY = [single]($y0 + $h * 0.34)
     $g.DrawLine($penSplit, $x0, $splitY, $x1, $splitY)
@@ -238,7 +268,7 @@ function New-MouseBitmap {
 
     # 大尺寸才补细节：滚轮凹槽 + 中缝
     if ($detail) {
-        $dark = [System.Drawing.Color]::FromArgb(48, 54, 66)
+        $dark = [System.Drawing.Color]::FromArgb(228, 8, 11, 16)
         $wheelW = [single]([math]::Round($s * 0.115))
         $wheelH = [single]([math]::Round($s * 0.15))
         if ($wheelW -lt 2) { $wheelW = 2 }
@@ -249,6 +279,11 @@ function New-MouseBitmap {
         $bWheel = New-Object System.Drawing.SolidBrush($dark)
         $g.FillPath($bWheel, $wheelPath)
         $bWheel.Dispose()
+        # 滚轮镶一圈信号色亮边，否则深色凹槽压在暗色外壳上根本看不出来
+        $penWR = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(110, $glow),
+            [single]([math]::Max(0.8, $s * 0.018)))
+        $g.DrawPath($penWR, $wheelPath)
+        $penWR.Dispose()
         $penSeam = New-Object System.Drawing.Pen($dark, [single]([math]::Max(1.0, $s * 0.045)))
         $g.DrawLine($penSeam, [single]($s * 0.5), [single]($wheelY + $wheelH + $s * 0.015),
                     [single]($s * 0.5), [single]($y0 + $h * 0.325))
