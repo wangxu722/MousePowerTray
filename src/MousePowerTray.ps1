@@ -91,6 +91,8 @@ function Get-DefaultConfig {
         UsbFrameType   = 'D1'
         UsbLevelIndex  = 3
         UsbLinkIndex   = 2
+        # 为 true 时上面三项优先于内置预设库（调试或预设识别错误时才用）
+        UsbForceConfig = $false
         LastUsbLevel   = -1
         Version        = 3
     }
@@ -923,6 +925,11 @@ $script:ActivePreset = $null
 
 # 动态全自适应 2.4G 扫描引擎：直接提取真实插入的物理 USB HID 节点的 VID/PID/UsagePage
 function Get-AllUsbCandidates {
+    # 动态扫描：直接读真实插入的 USB HID 节点，不依赖任何硬编码白名单。
+    # 关键一步是先按 VID:PID 把接口分组 —— 只有"同一物理设备上既有标准鼠标接口、
+    # 又有厂商私有通道"的才算候选接收器。不这么筛的话，带 RGB 的机械键盘、
+    # 耳机、主板灯控都会因为暴露 0xFFxx 通道被误当成鼠标接收器。
+    param([switch]$IncludeUnverified)
     $results = New-Object System.Collections.ArrayList
     try {
         if (-not ('HidBat' -as [type])) {
@@ -931,24 +938,48 @@ function Get-AllUsbCandidates {
         $enumRows = [HidBat]::Enumerate()
         if (-not $enumRows -or $enumRows[0] -eq 'ENUM-FAILED') { return @() }
 
+        $all = New-Object System.Collections.ArrayList
         foreach ($row in $enumRows) {
             $parts = $row -split '\|'
             if ($parts.Count -lt 9) { continue }
-            $vid = $parts[0]; $devPid = $parts[1]; $upage = $parts[2]
-            $inLen = 0; try { $inLen = [int]$parts[4] } catch { }
-            if ($inLen -le 0) { continue }
-
-            $upageInt = 0; try { $upageInt = [Convert]::ToInt32($upage, 16) } catch { }
-            # 严格筛选具有厂商自定义私有通信协议（UsagePage >= 0xFF00）的端点
-            if ($upageInt -lt 0xFF00) { continue }
-
-            # 排除非物理 USB 节点（如 I2C/ACPI 内部触摸板）
             $inst = $parts[8]
+            # 排除 I2C / ACPI 内部设备（笔记本触摸板）
             if ($inst -notlike 'USB\*' -and $inst -notlike 'HID\VID_*') { continue }
+            $upageInt = 0
+            try { $upageInt = [Convert]::ToInt32($parts[2], 16) } catch { continue }
+            $usageInt = 0
+            try { $usageInt = [Convert]::ToInt32($parts[3], 16) } catch { }
+            $inLen = 0
+            try { $inLen = [int]$parts[4] } catch { }
+            [void]$all.Add([pscustomobject]@{
+                Vid        = $parts[0]
+                Pid        = $parts[1]
+                Upage      = $parts[2]
+                UpageInt   = $upageInt
+                UsageInt   = $usageInt
+                InLen      = $inLen
+                Product    = $parts[7]
+                InstanceId = $inst
+                Key        = ('{0}:{1}' -f $parts[0], $parts[1])
+            })
+        }
 
-            $prod = if ($parts[7]) { $parts[7].Trim() } else { '' }
+        # 收集"具备标准鼠标接口"的 VID:PID
+        $mouseKeys = @{}
+        foreach ($r in $all) {
+            if ($r.UpageInt -eq 0x0002) { $mouseKeys[$r.Key] = $true }
+            elseif ($r.UpageInt -eq 0x0001 -and $r.UsageInt -eq 0x0002) { $mouseKeys[$r.Key] = $true }
+        }
 
-            # 1. 尝试匹配内置预设优化参数（Logitech HIDPP / 专用帧头等）
+        foreach ($r in $all) {
+            if ($r.UpageInt -lt 0xFF00) { continue }
+            if ($r.InLen -le 0) { continue }
+            if (-not $IncludeUnverified -and -not $mouseKeys.ContainsKey($r.Key)) { continue }
+
+            $prod = if ($r.Product) { $r.Product.Trim() } else { '' }
+            $vid = $r.Vid; $devPid = $r.Pid; $upage = $r.Upage
+
+            # 1. 优先匹配内置预设（罗技 HID++ / 专用帧头等）
             $matchedPreset = $null
             foreach ($p in $script:UsbPresets) {
                 if ($p.Vid.ToUpperInvariant() -eq $vid.ToUpperInvariant()) {
@@ -972,7 +1003,7 @@ function Get-AllUsbCandidates {
                      elseif ($prod -match '(?i)A4Tech|Bloody|Fstyler') { 'A4Tech' }
                      else { 'USB 2.4G' }
 
-            $item = @{
+            [void]$results.Add(@{
                 Brand       = $brand
                 Vid         = $vid
                 Pid         = $devPid
@@ -981,11 +1012,10 @@ function Get-AllUsbCandidates {
                 LevelIdx    = if ($matchedPreset) { $matchedPreset.LevelIdx } else { -1 }
                 LinkIdx     = if ($matchedPreset) { $matchedPreset.LinkIdx } else { -1 }
                 ProductName = $prod
-                InLen       = $inLen
-                InstanceId  = $inst
+                InLen       = $r.InLen
+                InstanceId  = $r.InstanceId
                 IsPreset    = [bool]$matchedPreset
-            }
-            [void]$results.Add($item)
+            })
         }
     }
     catch { }
@@ -1041,7 +1071,23 @@ function Start-UsbListener {
         if (-not ('HidBat' -as [type])) {
             Add-Type -TypeDefinition $script:UsbCSharp -Language CSharp -ErrorAction Stop
         }
-        if ([HidBat]::Start($upage, $vid, $pid_)) {
+        $started = [HidBat]::Start($upage, $vid, $pid_)
+        if (-not $started -and $script:Cfg.UsbUsagePage) {
+            # config 里记的接收器找不到了：换了鼠标、或插到别的 USB 口换了 InstanceId。
+            # 退回预设库按当前实际插入的硬件重新识别，否则用户只能手动删配置。
+            Write-Log 'USB-CFG-NOTFOUND fallback to preset scan'
+            $script:ActivePreset = $null
+            $fb = Find-UsbPreset
+            if ($fb) {
+                try { if ($fb.Vid) { $vid = [Convert]::ToInt32(('0x' + $fb.Vid), 16) } } catch { }
+                try { if ($fb.Pid) { $pid_ = [Convert]::ToInt32(('0x' + $fb.Pid), 16) } } catch { }
+                try { if ($fb.UsagePage) { $upage = [Convert]::ToInt32(('0x' + $fb.UsagePage), 16) } } catch { }
+                $script:ActivePreset = $fb
+                Write-Log ('USB-PRESET-FALLBACK brand={0} {1}:{2} upage=0x{3}' -f $fb.Brand, $fb.Vid, $fb.Pid, $fb.UsagePage)
+                $started = [HidBat]::Start($upage, $vid, $pid_)
+            }
+        }
+        if ($started) {
             $script:UsbWorker = $true
             # 接收器成功开启后台监听；等待收到真实鼠标无线帧后再置 Online，避免启动时压制在线蓝牙
             $script:Usb.Online = $false
@@ -1076,21 +1122,35 @@ function Update-UsbState {
     catch { }
     $frames = [HidBat]::Poll()
     $changed = $false
-    # 帧格式做成可配置的：换一个品牌的接收器时，多数情况只要改
-    # UsbFrameType / UsbLevelIndex / UsbLinkIndex 就能用，不必改代码。
+    # 参数来源优先级：命中内置预设 > config 里手工填的 > 兜底默认。
+    # 注意不能反过来 —— config 的 UsbFrameType/UsbLevelIndex 有非空默认值（D1/3/2），
+    # 一旦让 config 优先，预设库里所有非 D1 协议（如 00 AA、HID++）都会被遮住，
+    # 预设库就变成摆设了。用户想强制用自己的参数时打开 UsbForceConfig。
+    $presetActive = [bool]($script:ActivePreset -and $script:ActivePreset.IsPreset -and -not $script:Cfg.UsbForceConfig)
+
+    $frameTypeStr = ''
+    if ($presetActive -and $script:ActivePreset.FrameType) { $frameTypeStr = [string]$script:ActivePreset.FrameType }
+    elseif ($script:Cfg.UsbFrameType) { $frameTypeStr = [string]$script:Cfg.UsbFrameType }
     $typeWant = -1
-    $frameTypeStr = if ($script:Cfg.UsbFrameType) { $script:Cfg.UsbFrameType }
-                    elseif ($script:ActivePreset -and $script:ActivePreset.FrameType) { $script:ActivePreset.FrameType }
-                    else { '' }
     if ($frameTypeStr -and $frameTypeStr -ne 'HIDPP') {
         try { $typeWant = [Convert]::ToInt32($frameTypeStr, 16) } catch { $typeWant = -1 }
     }
-    $lvIdx = if ($null -ne $script:Cfg.UsbLevelIndex) { [int]$script:Cfg.UsbLevelIndex }
-             elseif ($script:ActivePreset -and $null -ne $script:ActivePreset.LevelIdx) { [int]$script:ActivePreset.LevelIdx }
-             else { 3 }
-    $lkIdx = if ($null -ne $script:Cfg.UsbLinkIndex) { [int]$script:Cfg.UsbLinkIndex }
-             elseif ($script:ActivePreset -and $null -ne $script:ActivePreset.LinkIdx) { [int]$script:ActivePreset.LinkIdx }
-             else { 2 }
+
+    $lvIdx = 3
+    if ($presetActive -and $null -ne $script:ActivePreset.LevelIdx -and [int]$script:ActivePreset.LevelIdx -ge 0) {
+        $lvIdx = [int]$script:ActivePreset.LevelIdx
+    }
+    elseif ($null -ne $script:Cfg.UsbLevelIndex -and [int]$script:Cfg.UsbLevelIndex -ge 0) {
+        $lvIdx = [int]$script:Cfg.UsbLevelIndex
+    }
+
+    $lkIdx = 2
+    if ($presetActive -and $null -ne $script:ActivePreset.LinkIdx) {
+        $lkIdx = [int]$script:ActivePreset.LinkIdx
+    }
+    elseif ($null -ne $script:Cfg.UsbLinkIndex) {
+        $lkIdx = [int]$script:Cfg.UsbLinkIndex
+    }
 
     foreach ($f in $frames) {
         # 罗技 HID++ 专用高层帧处理
@@ -1122,8 +1182,11 @@ function Update-UsbState {
         for ($i = 0; $i -lt $hex.Length; $i += 2) { $b += [Convert]::ToByte($hex.Substring($i, 2), 16) }
         if ($b.Count -lt 2) { continue }
 
-        # 始终记录收到的原始帧，方便诊断捕获与协议排查
-        Write-Log ('USB-FRAME len={0} raw={1}' -f $b.Count, $hex)
+        # 原始帧只在调试时落盘。之前是无条件写，2.4G 鼠标帧率高的时候
+        # 每秒几十次文件 IO 全压在 UI 线程上，会明显卡顿。
+        if ($script:Cfg.Debug) {
+            Write-Log ('USB-FRAME len={0} raw={1}' -f $b.Count, $hex)
+        }
 
         $lv = -1
         $link = 1
@@ -1166,15 +1229,13 @@ function Update-UsbState {
         $script:Usb.At = Get-Date
 
         if ($isIdle) {
-            # 鼠标物理开关切走（至蓝牙或关机）时上报 link=0，立即释放 2.4G 在线态并唤醒蓝牙探测
-            if ($script:Usb.Online) {
-                $script:Usb.Online = $false
-                $changed = $true
-                $script:PendingRefresh = $true
-                Write-Log 'USB-LINK-IDLE mouse switched away or sleep, trigger BLE scan'
-            }
+            # link=0 只代表"这一瞬间不上报"。实测（狼蛛 SC580 的 D1 帧）鼠标空闲时
+            # link 位会在 1.3 / 6 / 16 秒后自己回到 1 —— 立刻判离线会让图标在
+            # 停手两秒后变灰。记下时刻，连续 idle 满 3 秒才真正切走，判定放在循环外。
+            if (-not $script:Usb.IdleSince) { $script:Usb.IdleSince = Get-Date }
         }
         else {
+            $script:Usb.IdleSince = $null
             if (-not $script:Usb.Online) { $changed = $true }
             $script:Usb.Online = $true
         }
@@ -1191,14 +1252,26 @@ function Update-UsbState {
         }
     }
 
-    # 2.4G 离线判定：放宽至 1800 秒（30分钟）。
-    # 很多 2.4G 鼠标（如狼蛛 SC580）仅在电量跳变或开机唤醒时推帧，正常使用中电量长时间未降属于正常物理现象，
-    # 只要 USB 接收器未被拔除且仍在监听，维持在线与最后电量，避免误判断开。
-    if ($script:Usb.HasData -and $script:Usb.Online) {
-        if (((Get-Date) - $script:Usb.At).TotalSeconds -gt 180) {
+    # 连续 idle 达到阈值才认定鼠标真的切走 / 关机，释放 2.4G 在线态。
+    # 阈值取 90 秒：实测（狼蛛 SC580）空闲时 link 位会在 1.3 / 6 / 16 秒后自己回到 1，
+    # 判得太快会让图标在停手两秒后就变灰。真的切到蓝牙时会由 Get-DisplayState
+    # 的另一条规则（3 秒内无 2.4G 帧就优先显示在线蓝牙）立刻接管，不受这里影响。
+    if ($script:Usb.Online -and $script:Usb.Idle -and $script:Usb.IdleSince) {
+        if (((Get-Date) - $script:Usb.IdleSince).TotalSeconds -ge 90) {
             $script:Usb.Online = $false
             $changed = $true
-            Write-Log 'USB-OFFLINE (no frame in 180s)'
+            $script:PendingRefresh = $true
+            Write-Log 'USB-LINK-IDLE (idle 90s) treat as disconnected'
+        }
+    }
+
+    # 2.4G 离线兜底：长时间没有任何帧。很多 2.4G 鼠标只在电量跳变或开机唤醒时推帧，
+    # 正常使用中电量长时间不降属于正常物理现象，只要接收器还在监听就维持在线。
+    if ($script:Usb.HasData -and $script:Usb.Online) {
+        if (((Get-Date) - $script:Usb.At).TotalSeconds -gt 1800) {
+            $script:Usb.Online = $false
+            $changed = $true
+            Write-Log 'USB-OFFLINE (no frame in 1800s)'
         }
     }
 
@@ -1219,7 +1292,7 @@ $script:State = @{
 # 2.4G 接收器状态（独立于 BLE）
 $script:UsbWorker = $false
 $script:UsbTryAt = [datetime]::MinValue
-$script:Usb = @{ HasData = $false; Level = -1; Online = $false; At = $null; Idle = $false }
+$script:Usb = @{ HasData = $false; Level = -1; Online = $false; At = $null; Idle = $false; IdleSince = $null }
 $script:Worker = $null
 $script:WorkerHandle = $null
 $script:WorkerStart = [datetime]::MinValue
@@ -2528,14 +2601,17 @@ $timer.Add_Tick({
         $script:UsbTryAt = Get-Date
         Start-UsbListener
     }
-    # 看门狗：后台探测超过 15 秒判定为驱动/PnP 阻塞，强制重置
+    # 看门狗：后台探测超过 15 秒判定为驱动/PnP 阻塞，放弃这次结果
     if ($script:Worker) {
         if (((Get-Date) - $script:WorkerStart).TotalSeconds -gt 15) {
-            Write-Log 'PROBE-TIMEOUT worker hung > 15s, resetting'
+            Write-Log 'PROBE-TIMEOUT worker hung > 15s, discarding'
             try { $script:Worker.Stop() } catch { }
-            try { $script:Worker.Dispose() } catch { }
+            # 不 Dispose：Stop 对阻塞在 PnP 原生调用里的 runspace 未必生效，
+            # 此时 Dispose 会让后台线程访问已释放对象。交给 GC 收。
             $script:Worker = $null
             $script:WorkerHandle = $null
+            # 把起点拨到现在，等下一个完整周期再探，避免和还没退出的旧任务抢着查
+            $script:WorkerStart = Get-Date
         }
         else {
             Complete-Probe
@@ -2565,6 +2641,8 @@ try {
 }
 finally {
     try { $timer.Stop(); $timer.Dispose() } catch { }
+    # 异常退出（不是点菜单退出）时也要收掉 HID 线程，否则下次启动可能抢不到设备句柄
+    try { if ('HidBat' -as [type]) { [HidBat]::Stop(); [HidBat]::StopCapture() } } catch { }
     try { $script:FntTitle.Dispose(); $script:FntBig.Dispose(); $script:FntSub.Dispose(); $script:FntHint.Dispose() } catch { }
     try { $script:BrText.Dispose(); $script:BrSub.Dispose(); $script:BrTrack.Dispose() } catch { }
     try { if ($script:IconStream) { $script:IconStream.Dispose() } } catch { }
