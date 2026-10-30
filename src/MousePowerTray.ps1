@@ -1061,6 +1061,11 @@ function Get-AllUsbCandidates {
                      elseif ($prod -match '(?i)DAREU') { 'DAREU' }
                      elseif ($prod -match '(?i)Inphic') { 'Inphic' }
                      elseif ($prod -match '(?i)A4Tech|Bloody|Fstyler') { 'A4Tech' }
+                     # 这三家还没拿到 2.4G 帧格式，先只把名字认对（会走嗅探），
+                     # 免得显示名对不上 Get-UsbDeviceDisplayName 里的品牌表
+                     elseif ($prod -match '(?i)Razer') { 'Razer' }
+                     elseif ($prod -match '(?i)SteelSeries') { 'SteelSeries' }
+                     elseif ($prod -match '(?i)ASUS|\bROG\b') { 'ASUS' }
                      else { 'USB 2.4G' }
 
             [void]$results.Add(@{
@@ -2166,6 +2171,7 @@ function Get-DiagUsb {
     # 返回全部 HID 接口（含键鼠本体），供人眼判断哪个是接收器的厂商通道
     $rows = New-Object System.Collections.ArrayList
     $script:DiagUsbOk = $false
+    $script:DiagUsbErr = ''
     if (-not (Initialize-HidType)) { return $rows }
     $raw = [HidBat]::Enumerate()
     if (-not $raw -or $raw[0] -eq 'ENUM-FAILED') { return $rows }
@@ -2180,10 +2186,20 @@ function Get-DiagUsb {
         elseif ($inst -like 'HIDI2C\*' -or $inst -like 'ACPI\*') { $bus = 'i2c' }
         elseif ($inst -like 'BTHLE\*' -or $inst -like 'BTHLEDEVICE\*' -or $inst -like 'BTHENUM\*') { $bus = 'ble' }
         if ($f[0] -eq '0000' -and $f[1] -eq '0000') { $bus = 'novid' }
+        # 顺带跑一遍预设匹配：报告里能直接看出"这台机器上程序会认成什么、
+        # 用哪条通道、第几字节" —— 排查"支持但不出数"时这是最关键的一行
+        $preset = $null
+        if ($bus -eq 'usb') {
+            try { $preset = Find-PresetFor -Vid $f[0] -ProductId $f[1] -Upage $f[2] -Product $f[7] }
+            catch { $script:DiagUsbErr = $_.Exception.Message }
+        }
         [void]$rows.Add([pscustomobject]@{
             Vid = $f[0]; Pid = $f[1]; Upage = $f[2]; Usage = $f[3]
             In = [int]$f[4]; Out = [int]$f[5]; Feat = [int]$f[6]
             Product = $f[7]; InstanceId = $inst; Bus = $bus
+            PresetBrand = if ($preset) { [string]$preset.Brand } else { '' }
+            PresetFrame = if ($preset) { [string]$preset.FrameType } else { '' }
+            PresetLevel = if ($preset) { [string]$preset.LevelIdx } else { '' }
         })
     }
     $script:DiagUsbOk = ($rows.Count -gt 0)
@@ -2415,13 +2431,20 @@ function Invoke-Diagnose {
     $usb = @(Get-DiagUsb)
     if ($usb.Count -eq 0) {
         & $add ('  （枚举失败：' + $(if ($script:DiagUsbOk) { '没有可用接口' } else { 'HID 接口列表拿不到' }) + '）')
+        if ($script:DiagUsbErr) { & $add ('    原因: ' + $script:DiagUsbErr) }
     }
     else {
         & $add '  总线  VID:PID   UsagePage Usage  In Out Feat  产品名'
         foreach ($u in $usb) {
             $mark = ''
             if ([Convert]::ToInt32($u.Upage, 16) -ge 0xFF00) {
-                if ($u.Bus -eq 'usb') { $mark = '  <= 厂商通道(USB)' }
+                if ($u.Bus -eq 'usb') {
+                    if ($u.PresetBrand) {
+                        $fDesc = if ($u.PresetFrame) { $u.PresetFrame } else { '不过滤' }
+                        $mark = '  <= 厂商通道 · 预设 {0} 帧={1} 电量字节={2}' -f $u.PresetBrand, $fDesc, $u.PresetLevel
+                    }
+                    else { $mark = '  <= 厂商通道 · 未命中预设' }
+                }
                 else { $mark = '  <= 厂商通道(' + $u.Bus + '，非接收器)' }
             }
             elseif ($u.Bus -eq 'novid') { $mark = '  （蓝牙 HID，无 VID）' }
@@ -2438,6 +2461,29 @@ function Invoke-Diagnose {
             }
         }
         if (-not $anyUsb) { & $add '    （没有 USB 厂商通道）' }
+
+        # 告诉收集者"程序实际会怎么选"，避免报告和程序行为对不上时无从查起
+        & $add ''
+        & $add '  程序会怎么处理:'
+        if ($script:Cfg.UsbVid) {
+            & $add ('    用了 config.json 里手填的 {0}:{1} usage 0x{2}（不走自动识别）' -f
+                $script:Cfg.UsbVid, $script:Cfg.UsbPid, $script:Cfg.UsbUsagePage)
+        }
+        else {
+            $auto = @($usb | Where-Object { $_.Bus -eq 'usb' -and $_.PresetBrand }) | Select-Object -First 1
+            if ($auto) {
+                & $add ('    自动识别 -> {0}:{1} usage 0x{2}（预设 {3}，帧 {4}，电量字节 {5}）' -f
+                    $auto.Vid, $auto.Pid, $auto.Upage, $auto.PresetBrand,
+                    $(if ($auto.PresetFrame) { $auto.PresetFrame } else { '不过滤' }), $auto.PresetLevel)
+            }
+            else {
+                $anyVendor = @($usb | Where-Object { $_.Bus -eq 'usb' -and [Convert]::ToInt32($_.Upage, 16) -ge 0xFF00 })
+                if ($anyVendor.Count -gt 0) {
+                    & $add '    没命中预设 -> 会挑第一条厂商通道试，读不出数就自动嗅探（结果在界面标 ~）'
+                }
+                else { & $add '    没有可用的 USB 厂商通道，2.4G 模式不会启用' }
+            }
+        }
     }
     & $add ''
 
