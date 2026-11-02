@@ -362,6 +362,7 @@ $script:ProbeBlock = {
                            ForEach-Object { $_.InstanceId }) -join '|').ToUpperInvariant()
             $list = New-Object System.Collections.ArrayList
             $skipped = New-Object System.Collections.ArrayList
+            $seenMac = @{}
             foreach ($n in $nodes) {
                 $nm = ([string]$n.FriendlyName).Trim()
                 $dev = $null
@@ -378,6 +379,8 @@ $script:ProbeBlock = {
                     }
                 }
                 if ($dev.Mac) {
+                    if ($seenMac.ContainsKey($dev.Mac.ToUpperInvariant())) { continue }
+                    $seenMac[$dev.Mac.ToUpperInvariant()] = $true
                     $dev.Online = $hidIndex.Contains($dev.Mac.ToUpperInvariant())
                 }
                 [void]$list.Add($dev)
@@ -1814,25 +1817,44 @@ function Start-DiagnoseProcess {
 function Show-Picker {
     $devs = @($script:State.Devices)
     $allUsb = Get-AllUsbCandidates
-    $usbItems = @()
+    # 按物理设备 (Vid:Pid) 分组去重，避免复合接收器的多个私有通道在界面上显示为多台重复设备
+    $usbGroups = @{}
+    $usbKeys = New-Object System.Collections.ArrayList
     foreach ($cand in $allUsb) {
+        $devKey = ('{0}:{1}' -f $cand.Vid, $cand.Pid).ToUpperInvariant()
+        if (-not $usbGroups.ContainsKey($devKey)) {
+            $usbGroups[$devKey] = New-Object System.Collections.ArrayList
+            [void]$usbKeys.Add($devKey)
+        }
+        [void]$usbGroups[$devKey].Add($cand)
+    }
+
+    $usbItems = @()
+    foreach ($devKey in $usbKeys) {
+        $candidates = @($usbGroups[$devKey])
+        # 挑选最优候选通道：当前正在监听 > 命中内置预设库 > 报告长度较短者（状态帧）
+        $bestCand = $candidates | Sort-Object `
+            @{ Expression = { if ($script:ActivePreset -and $script:ActivePreset.Vid -eq $_.Vid -and $script:ActivePreset.Pid -eq $_.Pid -and $script:ActivePreset.UsagePage -eq $_.UsagePage) { 0 } else { 1 } } }, `
+            @{ Expression = { if ($_.IsPreset) { 0 } else { 1 } } }, `
+            @{ Expression = { $_.InLen } } | Select-Object -First 1
+
         $bleNameCandidate = ''
         if ($devs.Count -gt 0 -and $devs[0].Name) { $bleNameCandidate = $devs[0].Name }
         elseif ($script:State.Name) { $bleNameCandidate = $script:State.Name }
-        $usbFriendlyName = Get-UsbDeviceDisplayName -Preset $cand -BleName $bleNameCandidate
-        $isCurrentListening = ($script:UsbWorker -and $script:ActivePreset -and ($script:ActivePreset.Vid -eq $cand.Vid) -and ($script:ActivePreset.Pid -eq $cand.Pid))
+        $usbFriendlyName = Get-UsbDeviceDisplayName -Preset $bestCand -BleName $bleNameCandidate
+        $isCurrentListening = ($script:UsbWorker -and $script:ActivePreset -and ($script:ActivePreset.Vid -eq $bestCand.Vid) -and ($script:ActivePreset.Pid -eq $bestCand.Pid))
         $lvl = if ($isCurrentListening -and $script:Usb.Level -ge 0) { $script:Usb.Level }
-               elseif ($script:Cfg.UsbVid -eq $cand.Vid -and $script:Cfg.LastUsbLevel -ge 0) { [int]$script:Cfg.LastUsbLevel }
+               elseif ($script:Cfg.UsbVid -eq $bestCand.Vid -and $script:Cfg.LastUsbLevel -ge 0) { [int]$script:Cfg.LastUsbLevel }
                else { -1 }
         $onlineState = ($isCurrentListening -and [bool]$script:Usb.Online)
         $usbDev = @{
-            IsUsb = $true
-            Name = ('[2.4G] {0} ({1}:{2})' -f $usbFriendlyName, $cand.Vid, $cand.Pid)
+            IsUsb        = $true
+            Name         = ('[2.4G] {0} ({1}:{2})' -f $usbFriendlyName, $bestCand.Vid, $bestCand.Pid)
             FriendlyName = $usbFriendlyName
-            Level = $lvl
-            Online = $onlineState
-            Preset = $cand
-            Id = ('USB:' + $cand.Vid + ':' + $cand.Pid)
+            Level        = $lvl
+            Online       = $onlineState
+            Preset       = $bestCand
+            Id           = ('USB:' + $bestCand.Vid + ':' + $bestCand.Pid)
         }
         $usbItems += $usbDev
     }
