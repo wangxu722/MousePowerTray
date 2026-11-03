@@ -1170,8 +1170,9 @@ function Start-UsbListener {
         }
         if ($started) {
             $script:UsbWorker = $true
-            # 接收器成功开启后台监听；等待收到真实鼠标无线帧后再置 Online，避免启动时压制在线蓝牙
-            $script:Usb.Online = $false
+            # 冷启动优化：若已有历史电量且未连接在线蓝牙，启动初期默认置为在线态（避免静止鼠标假断开），由后续超时看门狗核验
+            $hasValidBle = ($script:State.Online -and $script:State.Mode -eq 'ble')
+            $script:Usb.Online = (-not $hasValidBle -and $script:Cfg.LastUsbLevel -ge 0)
             $script:Usb.At = Get-Date
             $script:Usb.Frames = 0                 # 本轮通道收到的帧数，用于判断要不要换通道
             $script:UsbNoFrameSince = Get-Date
@@ -1377,6 +1378,15 @@ function Update-UsbState {
             $changed = $true
             $script:PendingRefresh = $true
             Write-Log 'USB-LINK-IDLE (idle 90s) treat as disconnected'
+        }
+    }
+
+    # 冷启动宽限到期：启动后若超过 60 秒始终一帧都未收到，说明鼠标当前确实未开机/未通电，平滑回退为离线态
+    if ($script:Usb.Online -and $script:Usb.Frames -eq 0 -and $script:UsbNoFrameSince) {
+        if (((Get-Date) - $script:UsbNoFrameSince).TotalSeconds -ge 60) {
+            $script:Usb.Online = $false
+            $changed = $true
+            Write-Log 'USB-STARTUP-TIMEOUT (no initial frame in 60s) treat as disconnected'
         }
     }
 
