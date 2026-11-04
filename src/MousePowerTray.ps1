@@ -1391,6 +1391,19 @@ function Update-UsbState {
         }
     }
 
+    # 2.4G 突然安静下来（鼠标切到蓝牙、或者关机）→ 主动催一次蓝牙探测，
+    # 不用干等下一个探测周期。8 秒阈值配合 Get-DisplayState 的 3 秒优先窗口；
+    # 冷却 20 秒：AULA 这类鼠标本来就会间歇静默十几秒，不冷却会频繁触发 PnP 查询。
+    $silentSec = if ($script:Usb.At) { ((Get-Date) - $script:Usb.At).TotalSeconds } else { 9999 }
+    if ($script:Usb.Frames -gt 0 -and $silentSec -gt 8 -and
+        ((Get-Date) - $script:LastBlePokeAt).TotalSeconds -gt 20) {
+        $script:LastBlePokeAt = Get-Date
+        if (-not $script:Worker -and -not $script:PendingRefresh) {
+            $script:PendingRefresh = $true
+            Write-Log 'USB-WENT-SILENT -> poke BLE probe'
+        }
+    }
+
     if ($changed) { Update-Tray }
 }
 
@@ -1410,8 +1423,19 @@ $script:UsbWorker = $false
 $script:UsbTryAt = [datetime]::MinValue
 $script:Usb = @{ HasData = $false; Level = -1; Online = $false; At = $null; Idle = $false
                   Frames = 0; Estimated = $false }
+function Test-UsbActive {
+    # "2.4G 活跃"必须是"最近这段时间真的收到过帧"，而不是"曾经连上过"。
+    # 用 Usb.Online 判断会出问题：鼠标切到蓝牙之后接收器还挂着、Online 一直是 true，
+    # 于是蓝牙探测被节流到 60 秒一次，切过去要等半天才有反应。
+    param([int]$WithinSeconds = 15)
+    if (-not $script:UsbWorker) { return $false }
+    if (-not $script:Usb.At) { return $false }
+    return (((Get-Date) - $script:Usb.At).TotalSeconds -le $WithinSeconds)
+}
+
 # 候选接收器通道队列：一个接收器常有多条 0xFFxx 通道，其中只有一条是状态帧。
 # 先按"预设命中优先、报告短的优先"排序，启动后长时间没帧就换下一条。
+$script:LastBlePokeAt = [datetime]::MinValue   # 上次因 2.4G 静默而主动催蓝牙探测的时刻
 $script:UsbCandList = @()
 $script:UsbCandIdx = 0
 $script:UsbNoFrameSince = $null
@@ -1551,7 +1575,7 @@ function Apply-ProbeResult {
         }
         # 从在线翻成离线时：若 2.4G 已经活跃，说明是物理切走，无需 3 秒防抖；纯蓝牙时才延时防抖
         if ($script:State.Online -and -not $dev.Online) {
-            $usbActive = $script:UsbWorker -and $script:Usb.Online
+            $usbActive = Test-UsbActive -WithinSeconds 10
             if (-not $usbActive -and -not $script:PendingOffline) {
                 $script:PendingOffline = $true
                 $script:VerifyAt = (Get-Date).AddSeconds(3)
@@ -2813,9 +2837,13 @@ $timer.Add_Tick({
     elseif ($script:PendingRefresh) { $script:PendingRefresh = $false; Start-Probe }
     elseif ($script:VerifyAt -and (Get-Date) -ge $script:VerifyAt) { $script:VerifyAt = $null; Start-Probe }
     else {
-        # 绿色节能机制：若 2.4G 处于活跃连接态，自动延长蓝牙探测周期至 60 秒，减少无谓的 Get-PnpDevice 开销
-        $usbActive = $script:UsbWorker -and $script:Usb.Online
-        $intervalSec = if ($usbActive) { [math]::Max(60, $script:Cfg.RefreshSeconds) } else { $script:Cfg.RefreshSeconds }
+        # 绿色节能机制：只要这条 2.4G 通道确实在推帧，就把蓝牙探测降到 60 秒一次，
+        # 省掉无谓的 Get-PnpDevice 开销（单次 4~7 秒）。
+        # 判定用"收到过帧没有"而不是"最近有没有帧"：后者会让鼠标一静止就恢复 10 秒周期，
+        # 反而更费资源。切换响应靠下面那条"静默后主动催一次"来保证，不靠这里的高频轮询。
+        $usbWasActive = $script:UsbWorker -and $script:Usb.Frames -gt 0
+        $intervalSec = if ($usbWasActive) { [math]::Max(60, $script:Cfg.RefreshSeconds) }
+                       else { $script:Cfg.RefreshSeconds }
         if (((Get-Date) - $script:WorkerStart).TotalMilliseconds -ge ($intervalSec * 1000)) {
             Start-Probe
         }
