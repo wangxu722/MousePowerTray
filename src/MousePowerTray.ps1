@@ -1396,8 +1396,8 @@ function Update-UsbState {
     # 冷却 20 秒：AULA 这类鼠标本来就会间歇静默十几秒，不冷却会频繁触发 PnP 查询。
     $silentSec = if ($script:Usb.At) { ((Get-Date) - $script:Usb.At).TotalSeconds } else { 9999 }
     if ($script:Usb.Frames -gt 0 -and $silentSec -gt 8 -and
-        ((Get-Date) - $script:LastBlePokeAt).TotalSeconds -gt 20) {
-        $script:LastBlePokeAt = Get-Date
+        ((Get-Date) - $script:BlePokeAt).TotalSeconds -gt 120) {
+        $script:BlePokeAt = Get-Date
         if (-not $script:Worker -and -not $script:PendingRefresh) {
             $script:PendingRefresh = $true
             Write-Log 'USB-WENT-SILENT -> poke BLE probe'
@@ -1413,7 +1413,7 @@ $script:Cfg = Get-Config
 $script:State = @{
     Mode = 'none'; Level = -1; LastLevel = -1; Online = $false; Connected = $false
     Updated = $null; Name = ''; Mac = ''; Id = ''; Error = ''
-    LastSeen = $null; LastGoodUpdate = $null
+    LastGoodUpdate = $null
     Devices = @()
     # 扫描时"看到了但读不到电量"的设备，用于在选择框里解释为什么没列出来
     Skipped = @(); BleCount = 0
@@ -1435,7 +1435,7 @@ function Test-UsbActive {
 
 # 候选接收器通道队列：一个接收器常有多条 0xFFxx 通道，其中只有一条是状态帧。
 # 先按"预设命中优先、报告短的优先"排序，启动后长时间没帧就换下一条。
-$script:LastBlePokeAt = [datetime]::MinValue   # 上次因 2.4G 静默而主动催蓝牙探测的时刻
+$script:BlePokeAt = [datetime]::MinValue        # 上次因 2.4G 静默而主动催蓝牙探测的时刻
 $script:UsbCandList = @()
 $script:UsbCandIdx = 0
 $script:UsbNoFrameSince = $null
@@ -1456,6 +1456,7 @@ $script:LastPainted = ''
 $script:IconStream = $null
 $script:PopupUntil = [datetime]::MinValue
 $script:LowWarned = $false
+$script:NotifyAfterRefresh = $false
 
 function Start-Probe {
     param([switch]$Scan)
@@ -1600,7 +1601,6 @@ function Apply-ProbeResult {
         $script:State.Connected = [bool]$dev.Online
         $script:State.Online = [bool]$dev.Online
         if ($dev.Updated) { $script:State.Updated = $dev.Updated; $script:State.LastGoodUpdate = $dev.Updated }
-        if ($dev.Online) { $script:State.LastSeen = Get-Date }
         if ($dev.Online -and $script:Cfg.DeviceName -ne $dev.Name) {
             $script:Cfg.DeviceName = $dev.Name
             Save-Config
@@ -1620,6 +1620,27 @@ function Apply-ProbeResult {
             $script:ForceRescan = $true
             Write-Log 'RESCAN after repeated misses'
         }
+    }
+
+    # 手动刷新完成：弹一次气泡把结果说出来。
+    # 之前刷新是完全静默的 —— 数据没变化时用户看不到任何反馈，
+    # 会以为这个菜单项根本没生效。
+    if ($script:NotifyAfterRefresh) {
+        $script:NotifyAfterRefresh = $false
+        try {
+            $d = Get-DisplayState
+            $body = if ($d.Online -and $d.Level -ge 0) {
+                '{0} · 当前电量 {1}%' -f $d.Name, $d.Level
+            } elseif ($script:State.Name) {
+                '{0} · 未连接' -f $script:State.Name
+            } else {
+                '没有检测到可读电量的设备'
+            }
+            $script:NotifyIcon.ShowBalloonTip(4000, '刷新完成', $body,
+                [System.Windows.Forms.ToolTipIcon]::Info)
+            Write-Log ('REFRESH-DONE ' + $body)
+        }
+        catch { }
     }
 
     Update-Tray
@@ -2772,10 +2793,11 @@ $miPick.Add_Click({
     else { $script:PickerPending = $true; $script:NeedScan = $true; Start-Probe }
 })
 $miRefresh.Add_Click({
-    $script:State.Devices = @()
-    if ($script:Cfg.DeviceId) { $script:ForceRescan = $true }
-    else { $script:NeedScan = $true }
-    $script:State.LastSeen = $null
+    # 只做一次立即探测，不强制重新扫描设备列表。
+    # 之前这里设了 ForceRescan，会去枚举全机 BLE 设备（5 秒起步），
+    # 比常规单设备查询（4 秒）还慢 —— 而用户点刷新通常只是"想马上看到最新电量"，
+    # 不是"我换了鼠标"。换设备请走「选择设备… → 重新扫描」。
+    $script:NotifyAfterRefresh = $true
     # 断电/断连后系统移除 PnP 节点有几秒延迟，先立刻探一次，4 秒后再确认一次
     $script:VerifyAt = (Get-Date).AddSeconds(4)
     if ($script:Worker) { $script:PendingRefresh = $true } else { Start-Probe }
