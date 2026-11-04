@@ -924,8 +924,10 @@ $script:UsbPresets = @(
     @{ Brand = 'Xiaomi';   Vid = '2717'; UsagePage = 'FF00'; FrameType = '';      LevelIdx = -1; LinkIdx = -1 }
     # 狼蛛 AULA (SC580 / F87 等)
     @{ Brand = 'AULA';     Vid = '089D'; UsagePage = 'FF02'; FrameType = 'D1';    LevelIdx = 3;  LinkIdx = 2 }
-    # 瓦尔基里 VALKYRIE (VK M3 Series 实测 A8A5:2255 方案，00 AA 协议)
-    @{ Brand = 'VALKYRIE'; Vid = 'A8A5'; Pid = '2255'; UsagePage = 'FF01'; FrameType = 'AA'; LevelIdx = 5;  LinkIdx = 8 }
+    # A8A5:2255 是方案商 VID，瓦尔基里和钛度都用这一套（00 AA 协议）。
+    # 帧参数相同，但品牌名要靠产品名区分，否则钛度用户会看到"瓦尔基里"。
+    @{ Brand = 'VALKYRIE'; Vid = 'A8A5'; Pid = '2255'; NamePattern = 'VK|Valkyrie|瓦尔基里'; UsagePage = 'FF01'; FrameType = 'AA'; LevelIdx = 5; LinkIdx = 8 }
+    @{ Brand = 'Taidu';    Vid = 'A8A5'; Pid = '2255'; NamePattern = 'Taidu|TAIDU|钛度';          UsagePage = 'FF01'; FrameType = 'AA'; LevelIdx = 5; LinkIdx = 8 }
     # 瓦尔基里 VALKYRIE (VK M3 / M1 / M2 / M5 备用方案)
     # 248A 是共用 VID：瓦尔基里和多彩都用，只能靠产品名区分（NamePattern）
     @{ Brand = 'VALKYRIE'; Vid = '248A'; NamePattern = 'VK|Valkyrie|瓦尔基里'; UsagePage = 'FF02'; FrameType = 'D1'; LevelIdx = 3; LinkIdx = 2 }
@@ -1056,6 +1058,7 @@ function Get-AllUsbCandidates {
 
             $brand = if ($matchedPreset) { $matchedPreset.Brand }
                      elseif ($prod -match '(?i)VK|Valkyrie') { 'VALKYRIE' }
+                     elseif ($prod -match '(?i)Taidu|钛度') { 'Taidu' }
                      elseif ($prod -match '(?i)AULA') { 'AULA' }
                      elseif ($prod -match '(?i)Xiaomi|Mi') { 'Xiaomi' }
                      elseif ($prod -match '(?i)Logi') { 'Logitech' }
@@ -1316,21 +1319,19 @@ function Update-UsbState {
             }
         }
 
-        $isIdle = ($link -eq 0)
-        $script:Usb.Idle = $isIdle
+        # 链路位只用来在浮层里标"待机"，绝不参与在线/离线判定。
+        # 原因：这个字节的语义因固件而异 —— AULA 的 D1 帧里 [2] 确实是 0/1 跳变的链路标志，
+        # 但同一颗 A8A5:2255 方案换个品牌（钛度）就可能是恒 0 的别的字段。
+        # 一旦拿它判离线，就会出现"连上一会就断开、之后再也不刷新"的死循环：
+        # 每帧都被当成待机 → 判离线 → 后续帧虽把 Online 打回 true，Idle 却还是 true，
+        # Get-DisplayState 的条件永远不成立，UI 再也不显示 2.4G 状态。
+        # 现在只认"有没有帧"：有帧就是在用，没帧满 300 秒才算断开。
+        $script:Usb.Idle = ($link -eq 0)
         $script:Usb.At = Get-Date
 
-        if ($isIdle) {
-            # link=0 只代表"这一瞬间不上报"。实测（狼蛛 SC580 的 D1 帧）鼠标空闲时
-            # link 位会在 1.3 / 6 / 16 秒后自己回到 1 —— 立刻判离线会让图标在
-            # 停手两秒后变灰。记下时刻，连续 idle 满 3 秒才真正切走，判定放在循环外。
-            if (-not $script:Usb.IdleSince) { $script:Usb.IdleSince = Get-Date }
-        }
-        else {
-            $script:Usb.IdleSince = $null
-            if (-not $script:Usb.Online) { $changed = $true }
-            $script:Usb.Online = $true
-        }
+        # 收到任何一帧都说明鼠标正通过这条链路在通信
+        if (-not $script:Usb.Online) { $changed = $true }
+        $script:Usb.Online = $true
 
         if ($lv -ge 0) {
             if (-not $script:Usb.HasData -or $script:Usb.Level -ne $lv -or $script:Usb.Estimated -ne $isEstimated) { $changed = $true }
@@ -1368,35 +1369,25 @@ function Update-UsbState {
         }
     }
 
-    # 连续 idle 达到阈值才认定鼠标真的切走 / 关机，释放 2.4G 在线态。
-    # 阈值取 90 秒：实测（狼蛛 SC580）空闲时 link 位会在 1.3 / 6 / 16 秒后自己回到 1，
-    # 判得太快会让图标在停手两秒后就变灰。真的切到蓝牙时会由 Get-DisplayState
-    # 的另一条规则（3 秒内无 2.4G 帧就优先显示在线蓝牙）立刻接管，不受这里影响。
-    if ($script:Usb.Online -and $script:Usb.Idle -and $script:Usb.IdleSince) {
-        if (((Get-Date) - $script:Usb.IdleSince).TotalSeconds -ge 90) {
-            $script:Usb.Online = $false
-            $changed = $true
-            $script:PendingRefresh = $true
-            Write-Log 'USB-LINK-IDLE (idle 90s) treat as disconnected'
-        }
-    }
-
-    # 冷启动宽限到期：启动后若超过 60 秒始终一帧都未收到，说明鼠标当前确实未开机/未通电，平滑回退为离线态
+    # 冷启动宽限到期：启动后若一直一帧都未收到，说明鼠标当前确实未开机/未通电。
+    # 放宽到 180 秒 —— 有些 2.4G 鼠标开机后要过很久才推第一帧，60 秒太激进。
     if ($script:Usb.Online -and $script:Usb.Frames -eq 0 -and $script:UsbNoFrameSince) {
-        if (((Get-Date) - $script:UsbNoFrameSince).TotalSeconds -ge 60) {
+        if (((Get-Date) - $script:UsbNoFrameSince).TotalSeconds -ge 180) {
             $script:Usb.Online = $false
             $changed = $true
-            Write-Log 'USB-STARTUP-TIMEOUT (no initial frame in 60s) treat as disconnected'
+            Write-Log 'USB-STARTUP-TIMEOUT (no initial frame in 180s) treat as disconnected'
         }
     }
 
     # 2.4G 离线兜底：长时间没有任何帧。很多 2.4G 鼠标只在电量跳变或开机唤醒时推帧，
     # 正常使用中电量长时间不降属于正常物理现象，只要接收器还在监听就维持在线。
+    # 链路位不再参与判定后，这条是唯一能判断开的依据。取 180 秒：
+    # 实测 2.4G 帧间隔最长约 90 秒，留一倍余量；再长会让关机后拖很久才变灰。
     if ($script:Usb.HasData -and $script:Usb.Online) {
-        if (((Get-Date) - $script:Usb.At).TotalSeconds -gt 1800) {
+        if (((Get-Date) - $script:Usb.At).TotalSeconds -gt 180) {
             $script:Usb.Online = $false
             $changed = $true
-            Write-Log 'USB-OFFLINE (no frame in 1800s)'
+            Write-Log 'USB-OFFLINE (no frame in 180s)'
         }
     }
 
@@ -1418,7 +1409,7 @@ $script:State = @{
 $script:UsbWorker = $false
 $script:UsbTryAt = [datetime]::MinValue
 $script:Usb = @{ HasData = $false; Level = -1; Online = $false; At = $null; Idle = $false
-                  IdleSince = $null; Frames = 0; Estimated = $false }
+                  Frames = 0; Estimated = $false }
 # 候选接收器通道队列：一个接收器常有多条 0xFFxx 通道，其中只有一条是状态帧。
 # 先按"预设命中优先、报告短的优先"排序，启动后长时间没帧就换下一条。
 $script:UsbCandList = @()
@@ -1560,7 +1551,7 @@ function Apply-ProbeResult {
         }
         # 从在线翻成离线时：若 2.4G 已经活跃，说明是物理切走，无需 3 秒防抖；纯蓝牙时才延时防抖
         if ($script:State.Online -and -not $dev.Online) {
-            $usbActive = $script:UsbWorker -and $script:Usb.Online -and (-not $script:Usb.Idle)
+            $usbActive = $script:UsbWorker -and $script:Usb.Online
             if (-not $usbActive -and -not $script:PendingOffline) {
                 $script:PendingOffline = $true
                 $script:VerifyAt = (Get-Date).AddSeconds(3)
@@ -1636,6 +1627,7 @@ function Get-UsbDeviceDisplayName {
         'SteelSeries' = '赛睿 (SteelSeries)'
         'ASUS'        = '华硕 (ROG)'
         'VALKYRIE'    = '瓦尔基里 (VALKYRIE)'
+        'Taidu'       = '钛度 (Taidu)'
         'VK'          = '瓦尔基里 (VK)'
     }
 
@@ -1689,7 +1681,7 @@ function Get-UsbDeviceDisplayName {
 function Get-DisplayState {
     $s = $script:State
     $bleOnline = [bool]$s.Online
-    $usbOnline = $script:UsbWorker -and [bool]$script:Usb.Online -and (-not $script:Usb.Idle)
+    $usbOnline = $script:UsbWorker -and [bool]$script:Usb.Online
     $usbReady = $script:UsbWorker -and $script:Usb.HasData -and ($script:Usb.Level -ge 0)
     $nmBle = if ($s.Name) { $s.Name } else { $script:AppName }
 
@@ -2822,7 +2814,7 @@ $timer.Add_Tick({
     elseif ($script:VerifyAt -and (Get-Date) -ge $script:VerifyAt) { $script:VerifyAt = $null; Start-Probe }
     else {
         # 绿色节能机制：若 2.4G 处于活跃连接态，自动延长蓝牙探测周期至 60 秒，减少无谓的 Get-PnpDevice 开销
-        $usbActive = $script:UsbWorker -and $script:Usb.Online -and (-not $script:Usb.Idle)
+        $usbActive = $script:UsbWorker -and $script:Usb.Online
         $intervalSec = if ($usbActive) { [math]::Max(60, $script:Cfg.RefreshSeconds) } else { $script:Cfg.RefreshSeconds }
         if (((Get-Date) - $script:WorkerStart).TotalMilliseconds -ge ($intervalSec * 1000)) {
             Start-Probe
