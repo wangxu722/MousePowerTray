@@ -2408,8 +2408,8 @@ function Get-DiagConclusion {
 
 function Get-FrameDigest {
     # 把抓到的 CAP 行整理成"人＋机器都能读"的摘要。
-    # 关键：不同类型的状态帧（D1/D2/…）字节含义完全不同，
-    # 必须按「通道 + 长度 + 前两字节」先分组，组内统计才有意义。
+    # 判定思路的转变：电量在一次抓包里通常**不变**，所以"恒定的 1..100 值"才是最强候选，
+    # 而不是"值域落在 0..100 的字节"——后者会把加速度、按键计数全算进来。
     param($Cap)
     $out = New-Object System.Collections.ArrayList
     if (-not $Cap -or @($Cap).Count -eq 0) { return $out }
@@ -2430,7 +2430,7 @@ function Get-FrameDigest {
     $rank = 0
     foreach ($k in ($groups.Keys | Sort-Object)) {
         $parts = $k -split '\|'
-        $frames = $groups[$k]
+        $frames = @($groups[$k])
         $rank++
         [void]$out.Add(('  [类型{0}] 通道 0x{1}  {2} 字节  首 2 字节 0x{3}  共 {4} 帧' -f
             $rank, $parts[0], $parts[1], $parts[2], $frames.Count))
@@ -2444,27 +2444,49 @@ function Get-FrameDigest {
             continue
         }
 
-        $fixedShown = 0
+        $steady = New-Object System.Collections.ArrayList   # 恒定且在 1..100
+        $varying = New-Object System.Collections.ArrayList  # 变化但值域 <= 100
+        $bits = New-Object System.Collections.ArrayList     # 0/1 开关位
+
         for ($bi = 0; $bi -lt $byteCount; $bi++) {
-            $mn = 255; $mx = 0
+            $mn = 255; $mx = 0; $distinct = @{}
             foreach ($hf in $frames) {
                 if ($hf.Length -lt ($bi * 2 + 2)) { continue }
                 $v = [Convert]::ToByte($hf.Substring($bi * 2, 2), 16)
                 if ($v -lt $mn) { $mn = $v }
                 if ($v -gt $mx) { $mx = $v }
+                $distinct[$v] = 1
             }
             if ($mn -gt $mx) { continue }
-            # 判定顺序很重要：先排除开关位，再谈电量候选
-            $note = ''
+
             if ($mn -eq $mx) {
-                if ($mn -eq 0 -or $mn -gt 100) { continue }
-                if ($fixedShown -ge 3) { continue }
-                $fixedShown++
-                $note = '  固定值（本次没变，仅供参考）'
+                # 恒定字节：只有落在 1..100 的才可能是电量（0 通常是填充）
+                if ($mn -ge 1 -and $mn -le 100) {
+                    [void]$steady.Add([pscustomobject]@{ Idx = $bi; Val = $mn })
+                }
+                continue
             }
-            elseif ($mx -le 1) { $note = '  0/1 开关位（连接状态之类）' }
-            elseif ($mx -le 100) { $note = '  值域 0-100  <<< 最可能是电量' }
-            [void]$out.Add(('      [{0,2}]  0x{1:X2}..0x{2:X2}  ({3,3}..{4,3}){5}' -f $bi, $mn, $mx, $mn, $mx, $note))
+            if ($mx -le 1) { [void]$bits.Add($bi) }
+            elseif ($mx -le 100) {
+                [void]$varying.Add([pscustomobject]@{ Idx = $bi; Min = $mn; Max = $mx; N = $distinct.Count })
+            }
+        }
+
+        foreach ($s2 in $steady) {
+            [void]$out.Add(('       [{0,2}]  = {1,3}  (0x{1:X2})   全程未变  <<<< 最可能是电量' -f $s2.Idx, $s2.Val))
+        }
+        if ($bits.Count -gt 0) {
+            [void]$out.Add(('       [{0}]  恒在 0/1 之间  → 链路/连接状态位' -f ($bits -join ', ')))
+        }
+        foreach ($v2 in $varying) {
+            [void]$out.Add(('       [{0,2}]  {1,3}..{2,3}  (共 {3} 种取值)   变动中，多为按键/加速度/计数' -f
+                $v2.Idx, $v2.Min, $v2.Max, $v2.N))
+        }
+        if ($steady.Count -eq 0) {
+            [void]$out.Add('       （没有全程不变的 1..100 字节 —— 抓包期间电量可能变了，或者这次的帧不含电量）')
+        }
+        elseif ($steady.Count -gt 1) {
+            [void]$out.Add(('       （有 {0} 个恒定候选，对照系统设置页显示的电量数字即可锁定）' -f $steady.Count))
         }
     }
     return $out
@@ -2616,8 +2638,8 @@ function Invoke-Diagnose {
 
             Write-Host ''
             Write-Host '  抓包中…… 请现在操作鼠标：' -ForegroundColor Cyan
-            Write-Host '    · 关掉鼠标电源，等 3 秒，再打开（最重要）' -ForegroundColor Cyan
-            Write-Host '    · 按几下 DPI 键 / 模式切换键' -ForegroundColor Cyan
+            Write-Host '    · 按几下 DPI 键、滚一下滚轮、左右键各点几下（让其它字节动起来）' -ForegroundColor Cyan
+            Write-Host '    · 请不要关鼠标电源 —— 电量要保持在同一个值才认得出来' -ForegroundColor Yellow
             Write-Host ''
 
             $cap = New-Object System.Collections.ArrayList
@@ -2644,10 +2666,11 @@ function Invoke-Diagnose {
                 & $add '  —— 帧格式初判（同一类帧内，按字节位置统计取值范围）——'
                 foreach ($dl in (Get-FrameDigest -Cap $cap)) { & $add $dl }
                 & $add ''
-                & $add '  判读方法：关掉鼠标电源时归零、开机后回到几十的那个字节就是电量。'
-                & $add '  若所有字节都固定不动，说明这次没抓到状态变化，需要重抓。'
-                & $add '  同一个类型里出现多个 0-100 的候选时，对照系统设置页显示的电量'
-                & $add '  数字就能锁定是哪一个 —— 发送报告时把那个数字一起说明即可。'
+                & $add '  判读方法：电量的特征是"整场抓包都不变、且值在 1..100 之间"，'
+                & $add '  所以上面标「全程未变」的字节才是首选候选；标「变动中」的多是按键/加速度/计数。'
+                & $add '  如果有多个恒定候选，对照系统设置页显示的电量数字就能锁定 ——'
+                & $add '  发送报告时把那个数字一起说明即可。'
+                & $add '  若一个恒定候选都没有，说明抓包期间电量本身变了（比如关了电源），需要重抓。'
             }
             $capFile = Join-Path $outDir 'capture.txt'
             $cap | Set-Content -LiteralPath $capFile -Encoding UTF8
@@ -2841,8 +2864,8 @@ $miDiag.Add_Click({
 其中不含个人文件，账户名已打码。
 
 如果鼠标走的是 2.4G 接收器，还会监听 30 秒设备通道 —— 期间请：
-  1. 关掉鼠标电源，等 3 秒，再打开
-  2. 按几下 DPI 键
+  1. 按几下 DPI 键、滚一下滚轮、左右键各点几下
+  2. 不要关鼠标电源（关掉会让电量字节跟着变，反而不好认）
 
 会打开一个窗口显示进度，不要关它。
 
