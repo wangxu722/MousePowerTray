@@ -1117,6 +1117,8 @@ function Find-UsbPreset {
 
 function Start-UsbListener {
     if ($script:UsbWorker) { return }
+    # 退出时 Stop() 会让 IsRunning 变 false，这里不加判断就会在退出流程里重连一次
+    if ($script:ShuttingDown) { return }
 
     $vid = 0; $pid_ = 0; $upage = 0
     if ($script:Cfg.UsbUsagePage) {
@@ -1387,8 +1389,31 @@ function Update-UsbState {
         if (((Get-Date) - $script:Usb.At).TotalSeconds -gt 180) {
             $script:Usb.Online = $false
             $changed = $true
-            Write-Log 'USB-OFFLINE (no frame in 180s)'
+            Write-Log ('USB-OFFLINE (no frame in 180s) frames={0} vid={1} pid={2} upage={3}' -f
+                $script:Usb.Frames,
+                $(if ($script:ActivePreset) { $script:ActivePreset.Vid } else { $script:Cfg.UsbVid }),
+                $(if ($script:ActivePreset) { $script:ActivePreset.Pid } else { $script:Cfg.UsbPid }),
+                $(if ($script:ActivePreset) { $script:ActivePreset.UsagePage } else { $script:Cfg.UsbUsagePage }))
         }
+    }
+
+    # 自愈：config.json 里手填的通道一直收不到任何字节，多半是 UsagePage 填错了
+    # （从诊断报告里抄的那一条可能是查询通道而不是状态通道）。
+    # 等 90 秒仍无数据就丢掉手填参数、退回预设库重新识别一次。
+    if ($script:UsbWorker -and $script:Usb.Frames -eq 0 -and $script:Cfg.UsbUsagePage -and
+        -not $script:UsbCfgFallbackDone -and $script:UsbNoFrameSince -and
+        ((Get-Date) - $script:UsbNoFrameSince).TotalSeconds -ge 90) {
+        $script:UsbCfgFallbackDone = $true
+        Write-Log ('USB-CFG-NOFRAME usage 0x{0} 无数据，退回预设库重新识别' -f $script:Cfg.UsbUsagePage)
+        $script:Cfg.UsbUsagePage = ''
+        $script:Cfg.UsbVid = ''
+        $script:Cfg.UsbPid = ''
+        $script:ActivePreset = $null
+        $script:UsbCandIdx = 0
+        try { if ('HidBat' -as [type]) { [HidBat]::Stop() } } catch { }
+        $script:UsbWorker = $false
+        Start-UsbListener
+        return
     }
 
     # 2.4G 突然安静下来（鼠标切到蓝牙、或者关机）→ 主动催一次蓝牙探测，
@@ -1457,6 +1482,8 @@ $script:IconStream = $null
 $script:PopupUntil = [datetime]::MinValue
 $script:LowWarned = $false
 $script:NotifyAfterRefresh = $false
+$script:ShuttingDown = $false
+$script:UsbCfgFallbackDone = $false
 
 function Start-Probe {
     param([switch]$Scan)
@@ -1786,6 +1813,8 @@ function Get-DisplayState {
 }
 
 function Update-Tray {
+    # 退出过程中 NotifyIcon 已经被 Dispose，这时任何 Icon 赋值都会抛空引用
+    if ($script:ShuttingDown) { return }
     $s = $script:State
     $d = Get-DisplayState
     $mode = $d.Mode
@@ -2176,6 +2205,7 @@ function Set-Autostart {
 }
 
 function Stop-App {
+    $script:ShuttingDown = $true
     try { $script:NotifyIcon.Visible = $false; $script:NotifyIcon.Dispose() } catch { }
     try { if ($script:Popup) { $script:Popup.Dispose() } } catch { }
     # 收掉后台 Runspace
@@ -2883,6 +2913,7 @@ try {
     [System.Windows.Forms.Application]::Run()
 }
 finally {
+    $script:ShuttingDown = $true
     try { $timer.Stop(); $timer.Dispose() } catch { }
     # 异常退出（不是点菜单退出）时也要收掉 HID 线程，否则下次启动可能抢不到设备句柄
     try { if ('HidBat' -as [type]) { [HidBat]::Stop(); [HidBat]::StopCapture() } } catch { }
