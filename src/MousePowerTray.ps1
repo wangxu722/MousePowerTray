@@ -1097,10 +1097,12 @@ function Get-UsbCandidateList {
     param([switch]$Refresh)
     if ($Refresh -or @($script:UsbCandList).Count -eq 0) {
         $raw = @(Get-AllUsbCandidates)
-        # 排序：命中预设的优先；同为预设时取 in 报告更短的那条
-        # （状态帧普遍比查询/控制通道短，AULA 的 FF02=33 字节就比 FF01=64 更像状态帧）
+        # 排序：命中预设的最优先；其次按 in 报告长度升序（状态帧普遍比查询通道短，
+        # AULA 的 FF02=33 就比 FF01=64 更像状态帧）。
+        # 但 in < 8 的通道排最后 —— 2 字节的报告承载不了一个状态帧，
+        # 比如 A8A5 方案里的 0xFFA5（in=2），它排在前面只会白白浪费轮换机会。
         $script:UsbCandList = @($raw | Sort-Object `
-            @{ Expression = { if ($_.IsPreset) { 0 } else { 1 } } }, `
+            @{ Expression = { if ($_.IsPreset) { 0 } elseif ($_.InLen -ge 8) { 1 } else { 2 } } }, `
             @{ Expression = { $_.InLen } })
         if ($script:UsbCandIdx -ge $script:UsbCandList.Count) { $script:UsbCandIdx = 0 }
     }
